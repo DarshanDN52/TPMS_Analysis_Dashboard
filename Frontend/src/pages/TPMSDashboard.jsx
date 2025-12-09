@@ -151,7 +151,7 @@ function TPMSDashboard() {
     if (!isCollecting || !config) return;
 
     // Process a single message (whether live or simulated)
-    const processMessage = (msg) => {
+    const processMessage = (msg, timestampOverride = null) => {
       if (!msg || typeof msg === 'string') return;
       const watchId = (config?.watchId || '').trim().toUpperCase();
       if (watchId && msg.id !== watchId) return;
@@ -168,7 +168,7 @@ function TPMSDashboard() {
 
       if (bytes.length < 7) return;
 
-      const now = new Date();
+      const now = timestampOverride ? new Date(timestampOverride) : new Date();
       const timeLabel = now.toLocaleTimeString();
 
       const sensorId = bytes[0] & 0xFF;
@@ -282,7 +282,7 @@ function TPMSDashboard() {
               if (currentIndex >= parsedMessages.length) return;
 
               const msg = parsedMessages[currentIndex];
-              processMessage(msg);
+              processMessage(msg, msg.timestamp); // Pass original timestamp
 
               currentIndex++;
               if (currentIndex < parsedMessages.length) {
