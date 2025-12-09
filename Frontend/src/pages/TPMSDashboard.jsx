@@ -94,32 +94,31 @@ function TPMSDashboard() {
     const initialTires = {};
     let initialHistory = { pressure: {}, temperature: {}, battery: {} };
 
-    const savedHistoryStr = sessionStorage.getItem('tpmsHistory');
-    if (savedHistoryStr) {
-      try {
-        const savedHistory = JSON.parse(savedHistoryStr);
-        if (savedHistory && savedHistory.pressure && savedHistory.temperature && savedHistory.battery) {
-          initialHistory = savedHistory;
-        }
-      } catch (err) { void err; }
+    // -- Live Mode: Try to restore previous session data --
+    if (!config?.isMockMode) {
+      const savedHistoryStr = sessionStorage.getItem('tpmsLiveHistory'); // Changed key
+      if (savedHistoryStr) {
+        try {
+          const savedHistory = JSON.parse(savedHistoryStr);
+          if (savedHistory && savedHistory.pressure && savedHistory.temperature && savedHistory.battery) {
+            initialHistory = savedHistory;
+          }
+        } catch (err) { void err; }
+      }
     }
 
-    // Restore tire data if available
-    const savedTireDataStr = sessionStorage.getItem('tpmsTireData');
+    // -- Live Mode: Try to restore previous tire data --
+    const savedTireDataStr = sessionStorage.getItem('tpmsLiveTireData'); // Changed key
     let savedTireData = null;
-    if (savedTireDataStr) {
+    if (!config?.isMockMode && savedTireDataStr) {
       try {
         savedTireData = JSON.parse(savedTireDataStr);
       } catch (err) { void err; }
     }
 
-    // Reconstruct tires, merging with saved data if it matches the current config
+    // Reconstruct tires, merging with saved data only if NOT in Mock Mode (checked above)
     for (let i = 1; i <= parsed.totalTires; i++) {
       const existingInfo = savedTireData && savedTireData[i] ? savedTireData[i] : {};
-      // Note: We reconstruct 'id' and 'position' to ensure they match current config,
-      // but preserve sensor values (pressure etc) if they were saved.
-      // We do *not* check if 'existingInfo' belongs to the same config layout strictly,
-      // but 'totalTires' check above guards slightly. ideally we should version check too.
 
       initialTires[i] = {
         id: i,
@@ -127,13 +126,14 @@ function TPMSDashboard() {
         pressure: existingInfo.pressure || 0,
         temperature: existingInfo.temperature || 0,
         battery: existingInfo.battery || 0,
-        status: existingInfo.status || 'missing',
+        status: 'normal',
         lastUpdate: existingInfo.lastUpdate ? new Date(existingInfo.lastUpdate) : new Date(),
       };
       initialHistory.pressure[i] = initialHistory.pressure[i] || [];
       initialHistory.temperature[i] = initialHistory.temperature[i] || [];
       initialHistory.battery[i] = initialHistory.battery[i] || [];
     }
+
     setTireData(initialTires);
     setDataHistory(initialHistory);
 
@@ -150,99 +150,183 @@ function TPMSDashboard() {
   useEffect(() => {
     if (!isCollecting || !config) return;
 
-    let intervalId;
+    // Process a single message (whether live or simulated)
+    const processMessage = (msg) => {
+      if (!msg || typeof msg === 'string') return;
+      const watchId = (config?.watchId || '').trim().toUpperCase();
+      if (watchId && msg.id !== watchId) return;
 
-    const fetchData = async () => {
-      try {
-        const res = await pcanApi.read();
-        // console.log('TPMS Read:', res); // Debug log
-        const msg = res?.payload?.data?.message;
-        if (!msg || typeof msg === 'string') return;
-        const watchId = (config?.watchId || '').trim().toUpperCase();
-        if (watchId && msg.id !== watchId) return;
+      // Parse hex string "04 01 ..." into array if needed
+      let bytes;
+      if (typeof msg.data === 'string') {
+        bytes = msg.data.split(' ').map(h => parseInt(h, 16));
+      } else if (Array.isArray(msg.data)) {
+        bytes = msg.data;
+      } else {
+        return;
+      }
 
-        const now = new Date();
-        const timeLabel = now.toLocaleTimeString();
-        const bytes = Array.isArray(msg.data) ? msg.data : [];
-        if (bytes.length < 7) return;
+      if (bytes.length < 7) return;
 
-        const sensorId = bytes[0] & 0xFF;
-        const tireIndex = sensorId + 1;
-        if (tireIndex < 1 || !config?.totalTires || tireIndex > config.totalTires) return;
+      const now = new Date();
+      const timeLabel = now.toLocaleTimeString();
 
-        const packetType = bytes[1] & 0xFF;
-        console.log(`DEBUG: ID=${tireIndex} Type=${packetType} Bytes=${bytes.join(',')}`);
-        let pressure, temperature, battery;
+      const sensorId = bytes[0] & 0xFF;
+      const tireIndex = sensorId + 1;
+      if (tireIndex < 1 || !config?.totalTires || tireIndex > config.totalTires) return;
 
-        // Update data for Normal (0x01), Low (0x10/16), Critical (0x11/17)
-        // For all others (like type 2), use existing values
-        if (packetType !== 0x01 && packetType !== 0x10 && packetType !== 0x11) {
-          // Use existing values or default to 0 for non-data packets
-          const existing = tireDataRef.current[tireIndex] || {};
-          pressure = existing.pressure || 0;
-          temperature = existing.temperature || 0;
-          battery = existing.battery || 0;
-        } else {
-          // Calculate new values
-          pressure = ((bytes[2] << 8) | bytes[3]) & 0xFFFF;
-          const tempRaw = ((bytes[5] << 8) | bytes[4]) & 0xFFFF;
-          temperature = (tempRaw - 8500) / 100;
-          battery = ((bytes[6] * 10) + 2000) / 1000;
+      const packetType = bytes[1] & 0xFF;
+      console.log(`DEBUG: ID=${tireIndex} Type=${packetType} Bytes=${bytes.join(',')}`);
+
+      let pressure, temperature, battery;
+
+      // Update data for Normal (0x01), Low (0x10/16), Critical (0x11/17)
+      // For all others (like type 2), use existing values
+      if (packetType !== 0x01 && packetType !== 0x10 && packetType !== 0x11) {
+        // Use existing values or default to 0 for non-data packets
+        const existing = tireDataRef.current[tireIndex] || {};
+        pressure = existing.pressure || 0;
+        temperature = existing.temperature || 0;
+        battery = existing.battery || 0;
+      } else {
+        // Calculate new values
+        pressure = ((bytes[2] << 8) | bytes[3]) & 0xFFFF;
+        const tempRaw = ((bytes[5] << 8) | bytes[4]) & 0xFFFF;
+        temperature = (tempRaw - 8500) / 100;
+        battery = ((bytes[6] * 10) + 2000) / 1000;
+      }
+
+      const severity = (pt => {
+        if (pt === 0x01) return 'ok';
+        if (pt === 0x02) return 'info';
+        if (pt === 0x03) return 'missing';
+        if (pt === 0x04 || pt === 0x05) return 'warning';
+        if (pt >= 0x06 && pt <= 0x09) return 'reserved';
+        if (pt === 0x10) return 'low';
+        if (pt === 0x11) return 'critical';
+        return 'ok';
+      })(packetType);
+
+      setTireData(prevTireData => {
+        const updatedTireData = { ...prevTireData };
+        if (updatedTireData[tireIndex]) {
+          updatedTireData[tireIndex] = {
+            ...updatedTireData[tireIndex],
+            pressure,
+            temperature,
+            battery,
+            lastUpdate: now,
+            status: severity,
+          };
         }
-
-        const severity = (pt => {
-          if (pt === 0x01) return 'ok';
-          if (pt === 0x02) return 'info';
-          if (pt === 0x03) return 'missing';
-          if (pt === 0x04 || pt === 0x05) return 'warning';
-          if (pt >= 0x06 && pt <= 0x09) return 'reserved';
-          if (pt === 0x10) return 'low';
-          if (pt === 0x11) return 'critical';
-          return 'ok';
-        })(packetType);
-
-        setTireData(prevTireData => {
-          const updatedTireData = { ...prevTireData };
-          if (updatedTireData[tireIndex]) {
-            updatedTireData[tireIndex] = {
-              ...updatedTireData[tireIndex],
-              pressure,
-              temperature,
-              battery,
-              lastUpdate: now,
-              status: severity,
-            };
+        try {
+          // Only save to live keys if not in simulation mode
+          if (!config?.isMockMode) {
+            sessionStorage.setItem('tpmsLiveTireData', JSON.stringify(updatedTireData));
           }
-          try { sessionStorage.setItem('tpmsTireData', JSON.stringify(updatedTireData)); } catch (err) { void err; }
-          return updatedTireData;
-        });
+        } catch (err) { void err; }
+        return updatedTireData;
+      });
 
-        setDataHistory(prevHistory => {
-          const newHistory = { ...prevHistory };
-          ['pressure', 'temperature', 'battery'].forEach(metric => {
-            const value = metric === 'pressure' ? pressure : metric === 'temperature' ? temperature : battery;
-            if (!newHistory[metric][tireIndex]) newHistory[metric][tireIndex] = [];
-            newHistory[metric][tireIndex] = [...newHistory[metric][tireIndex], { x: timeLabel, y: value }];
-            if (newHistory[metric][tireIndex].length > MAX_HISTORY_POINTS) {
-              newHistory[metric][tireIndex] = newHistory[metric][tireIndex].slice(-MAX_HISTORY_POINTS);
-            }
-          });
-          try { sessionStorage.setItem('tpmsHistory', JSON.stringify(newHistory)); } catch (err) { void err; }
-          return newHistory;
+      setDataHistory(prevHistory => {
+        const newHistory = { ...prevHistory };
+        ['pressure', 'temperature', 'battery'].forEach(metric => {
+          const value = metric === 'pressure' ? pressure : metric === 'temperature' ? temperature : battery;
+          if (!newHistory[metric][tireIndex]) newHistory[metric][tireIndex] = [];
+          newHistory[metric][tireIndex] = [...newHistory[metric][tireIndex], { x: timeLabel, y: value }];
+          if (newHistory[metric][tireIndex].length > MAX_HISTORY_POINTS) {
+            newHistory[metric][tireIndex] = newHistory[metric][tireIndex].slice(-MAX_HISTORY_POINTS);
+          }
         });
-      } catch (e) { void e; }
+        try {
+          // Only save to live keys if not in simulation mode
+          if (!config?.isMockMode) {
+            sessionStorage.setItem('tpmsLiveHistory', JSON.stringify(newHistory));
+          }
+        } catch (err) { void err; }
+        return newHistory;
+      });
     };
 
-    const startFetching = async () => {
-      intervalId = setInterval(fetchData, 100);
-    };
+    let intervalId;
+    let simulationTimeoutId;
 
-    startFetching();
+    if (config.isMockMode) {
+      // --- SIMULATION MODE ---
+      try {
+        const storedData = sessionStorage.getItem('tpmsSimulationData');
+        if (storedData) {
+          let parsedMessages = [];
+          const parsedJson = JSON.parse(storedData);
+
+          // Handle both file formats: Raw { messages: [] } or Array of Sessions [ { messages: [] } ]
+          if (Array.isArray(parsedJson)) {
+            // Flatten all sessions
+            parsedJson.forEach(session => {
+              if (session.messages && Array.isArray(session.messages)) {
+                parsedMessages = [...parsedMessages, ...session.messages];
+              }
+            });
+          } else if (parsedJson.messages && Array.isArray(parsedJson.messages)) {
+            parsedMessages = parsedJson.messages;
+          }
+
+          if (parsedMessages.length > 0) {
+            // Sort by timestamp just in case
+            parsedMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+            let currentIndex = 0;
+            const startTime = new Date(parsedMessages[0].timestamp).getTime();
+
+            const playSimulation = () => {
+              if (currentIndex >= parsedMessages.length) return;
+
+              const msg = parsedMessages[currentIndex];
+              processMessage(msg);
+
+              currentIndex++;
+              if (currentIndex < parsedMessages.length) {
+                const nextMsg = parsedMessages[currentIndex];
+                const currentMsgTime = new Date(msg.timestamp).getTime();
+                const nextMsgTime = new Date(nextMsg.timestamp).getTime();
+                const delay = Math.max(0, nextMsgTime - currentMsgTime);
+
+                // Limit delay to max 3 seconds to avoid long pauses in replay
+                const cappedDelay = Math.min(delay, 3000);
+
+                simulationTimeoutId = setTimeout(playSimulation, cappedDelay);
+              }
+            };
+
+            console.log(`Starting Simulation with ${parsedMessages.length} messages...`);
+            playSimulation();
+          } else {
+            console.warn("No messages found in simulation file.");
+          }
+        }
+      } catch (err) {
+        console.error("Simulation parse error:", err);
+      }
+
+    } else {
+      // --- LIVE MODE ---
+      const fetchData = async () => {
+        try {
+          const res = await pcanApi.read();
+          const msg = res?.payload?.data?.message;
+          if (msg) processMessage(msg);
+        } catch (e) { void e; }
+      };
+
+      const startFetching = async () => {
+        intervalId = setInterval(fetchData, 100);
+      };
+      startFetching();
+    }
 
     return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
+      if (intervalId) clearInterval(intervalId);
+      if (simulationTimeoutId) clearTimeout(simulationTimeoutId);
     };
   }, [isCollecting, config, calculateStatus]);
 
@@ -1149,6 +1233,7 @@ const globalStyles = `
     font-size: 14px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    color: #ffffff;
   }
 
   #tpms-table tbody tr { border-bottom: 1px solid var(--card-border); transition: all 0.2s ease; }

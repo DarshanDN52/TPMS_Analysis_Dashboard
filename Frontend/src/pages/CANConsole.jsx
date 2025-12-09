@@ -19,6 +19,8 @@ function CANConsole() {
   const [tireCount, setTireCount] = useState(6);
   const [tireConfig, setTireConfig] = useState('2,4');
   const [tpmsError, setTpmsError] = useState('');
+  const [isMockMode, setIsMockMode] = useState(false);
+  const [mockData, setMockData] = useState(null);
 
   const pollTimerRef = useRef(null);
   const MAX_BUFFER_SIZE = 1000;
@@ -245,10 +247,43 @@ function CANConsole() {
     sessionStorage.setItem('tpmsConfig', JSON.stringify({
       totalTires: total,
       axleConfig: configArr,
-      configStr: tireConfig
+      configStr: tireConfig,
+      isMockMode
     }));
 
+    if (isMockMode && mockData) {
+      sessionStorage.setItem('tpmsSimulationData', JSON.stringify(mockData));
+    } else {
+      sessionStorage.removeItem('tpmsSimulationData');
+    }
+
     navigate('/tpms');
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        let content = event.target.result;
+        // Robustness: Trim whitespace and remove trailing '.' if present (common user typo)
+        content = content.trim();
+        if (content.endsWith('.')) {
+          content = content.slice(0, -1).trim();
+        }
+
+        const json = JSON.parse(content);
+        setMockData(json);
+        setTpmsError('');
+      } catch (err) {
+        console.error("JSON Parse Error:", err);
+        setTpmsError(`Invalid JSON file: ${err.message}`);
+        setMockData(null);
+      }
+    };
+    reader.readAsText(file);
   };
 
   useEffect(() => {
@@ -451,6 +486,38 @@ function CANConsole() {
               </div>
 
               <p className="hint">Example: Enter "2,4" for a truck with 2 front tires and 4 rear tires (total 6)</p>
+
+              <div className="field" style={{ marginTop: '15px' }}>
+                <span>Operation Mode</span>
+                <select
+                  value={isMockMode ? 'simulation' : 'live'}
+                  onChange={(e) => setIsMockMode(e.target.value === 'simulation')}
+                  style={{
+                    padding: '8px',
+                    borderRadius: '6px',
+                    background: 'var(--bg)',
+                    color: 'var(--text)',
+                    border: '1px solid var(--border)',
+                    width: '100%'
+                  }}
+                >
+                  <option value="live">Live Mode</option>
+                  <option value="simulation">Simulation Mode</option>
+                </select>
+              </div>
+
+              {isMockMode && (
+                <div className="field">
+                  <span>Select Data File (JSON)</span>
+                  <input
+                    type="file"
+                    accept=".json"
+                    onChange={handleFileUpload}
+                    style={{ color: 'var(--text)' }}
+                  />
+                  {mockData && <p style={{ color: 'var(--success)', fontSize: '12px', margin: '5px 0' }}>✓ File loaded</p>}
+                </div>
+              )}
               {tpmsError && <p className="error-message">{tpmsError}</p>}
               <div className="button-row">
                 <button type="submit" className="primary">Load TPMS Dashboard</button>
