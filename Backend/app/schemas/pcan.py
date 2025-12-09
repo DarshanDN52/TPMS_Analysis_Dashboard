@@ -28,8 +28,12 @@ class SaveDataRequest(BaseModel):
     command: str
     payload: SaveDataPayload
 
-class ResponsePayload(BaseModel):
+class Result(BaseModel):
     status: str
+    message: str
+
+class ResponsePayload(BaseModel):
+    result: Result
     data: Any
     packet_status: str
 

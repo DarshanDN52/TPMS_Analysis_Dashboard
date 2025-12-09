@@ -3,6 +3,8 @@ import sys
 import os
 import threading
 import time
+import json
+from datetime import datetime
 from collections import deque
 
 # Add root directory to path to import PCANBasic
@@ -51,6 +53,12 @@ class PCANService:
         self.read_buffer = deque(maxlen=2000)
         self.reader_thread: Optional[threading.Thread] = None
         self.reader_running = False
+        
+        # Streaming state
+        self.recording = False
+        self.record_path = os.path.join(root_dir, 'tpms_streamed_data.json')
+        self.stream_file = None
+        self.first_message = True
         
         # Try to instantiate PCANBasic if available
         if PCANBasic is not None:
@@ -145,6 +153,57 @@ class PCANService:
                     self.pcan.SetValue(pcan_channel, PCAN_RECEIVE_STATUS, PCAN_PARAMETER_ON)
                 except Exception:
                     pass
+                except Exception:
+                    pass
+                
+                # Start recording to file
+                try:
+                    # Check if file exists to determine if we need to start array or append
+                    file_exists = os.path.exists(self.record_path)
+                    
+                    if file_exists:
+                        # If file exists, we need to remove the trailing ']' to append
+                        try:
+                            with open(self.record_path, 'rb+') as f:
+                                f.seek(0, os.SEEK_END)
+                                pos = f.tell()
+                                if pos > 1:
+                                    # Search backwards for the last ']'
+                                    # This is a simple assumption that the file ends with '}\n]' or '}' or ']'
+                                    # We will just remove the last byte if it is ']'
+                                    # A safer way is ensuring we always write ']' on release. 
+                                    # So we remove the last char.
+                                    f.seek(-1, os.SEEK_END)
+                                    char = f.read(1)
+                                    if char == b']':
+                                        f.seek(-1, os.SEEK_END)
+                                        f.truncate()
+                                        needs_comma = True
+                                    else:
+                                        # File might be corrupted or empty array
+                                        needs_comma = False
+                                else:
+                                    needs_comma = False
+                        except Exception:
+                            # If binary edit fails, maybe file is locked, risky fallback
+                            needs_comma = False
+                            
+                        self.stream_file = open(self.record_path, 'a')
+                        if needs_comma:
+                            self.stream_file.write(',\n')
+                    else:
+                        # New file, start array
+                        self.stream_file = open(self.record_path, 'w')
+                        self.stream_file.write('[\n')
+                    
+                    # Write Session Object Start
+                    self.stream_file.write(f'  {{\n    "initializationTime": "{datetime.now().isoformat()}",\n    "messages": [\n')
+                    self.stream_file.flush()
+                    self.recording = True
+                    self.first_message = True
+                except Exception as e:
+                    print(f"Failed to start recording: {e}")
+
                 return {
                     "success": True,
                     "message": f"Channel {channel} initialized successfully at {baudrate}"
@@ -185,6 +244,19 @@ class PCANService:
                             self.reader_thread.join(timeout=1.0)
                     except Exception:
                         pass
+                
+                # Stop recording and close file
+                if self.recording and self.stream_file:
+                    try:
+                        self.stream_file.write(f'\n    ],\n    "releaseTime": "{datetime.now().isoformat()}"\n  }}')
+                        # Always write the closing array bracket. The next init will strip it if appending.
+                        self.stream_file.write('\n]')
+                        self.stream_file.close()
+                    except Exception:
+                        pass
+                    self.stream_file = None
+                    self.recording = False
+
                 result = self.pcan.Uninitialize(self.channel_map[self.channel])
                 self.initialized = False
                 self.channel = None
@@ -413,6 +485,26 @@ class PCANService:
                                 "timestamp": self._timestamp_to_us(timestamp)
                             }
                             self.read_buffer.append(item)
+                            
+                            # Stream to file if recording
+                            if self.recording and self.stream_file:
+                                try:
+                                    if not self.first_message:
+                                        self.stream_file.write(',\n')
+                                    else:
+                                        self.first_message = False
+                                    
+                                    # Format data as space-separated hex string
+                                    hex_data = ' '.join([f"{x:02X}" for x in item['data']])
+                                    record_obj = {
+                                        "id": item['id'],
+                                        "data": hex_data,
+                                        "timestamp": datetime.now().isoformat()
+                                    }
+                                    self.stream_file.write(f'    {json.dumps(record_obj)}')
+                                except Exception:
+                                    pass
+
                             continue
                         elif status_code == PCAN_ERROR_QRCVEMPTY:
                             break

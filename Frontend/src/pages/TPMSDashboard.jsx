@@ -23,6 +23,11 @@ function TPMSDashboard() {
     return { totalTires: 6, axleConfig: [2, 4], configStr: '2,4' };
   });
   const [tireData, setTireData] = useState({});
+  const tireDataRef = useRef({});
+
+  useEffect(() => {
+    tireDataRef.current = tireData;
+  }, [tireData]);
   const [view, setView] = useState('top-view');
   const [selectedMetric, setSelectedMetric] = useState('pressure');
   const [selectedTire, setSelectedTire] = useState(null);
@@ -166,10 +171,24 @@ function TPMSDashboard() {
         if (tireIndex < 1 || !config?.totalTires || tireIndex > config.totalTires) return;
 
         const packetType = bytes[1] & 0xFF;
-        const pressure = ((bytes[2] << 8) | bytes[3]) & 0xFFFF;
-        const tempRaw = ((bytes[5] << 8) | bytes[4]) & 0xFFFF;
-        const temperature = (tempRaw - 8500) / 100;
-        const battery = ((bytes[6] * 10) + 2000) / 1000;
+        console.log(`DEBUG: ID=${tireIndex} Type=${packetType} Bytes=${bytes.join(',')}`);
+        let pressure, temperature, battery;
+
+        // Update data for Normal (0x01), Low (0x10/16), Critical (0x11/17)
+        // For all others (like type 2), use existing values
+        if (packetType !== 0x01 && packetType !== 0x10 && packetType !== 0x11) {
+          // Use existing values or default to 0 for non-data packets
+          const existing = tireDataRef.current[tireIndex] || {};
+          pressure = existing.pressure || 0;
+          temperature = existing.temperature || 0;
+          battery = existing.battery || 0;
+        } else {
+          // Calculate new values
+          pressure = ((bytes[2] << 8) | bytes[3]) & 0xFFFF;
+          const tempRaw = ((bytes[5] << 8) | bytes[4]) & 0xFFFF;
+          temperature = (tempRaw - 8500) / 100;
+          battery = ((bytes[6] * 10) + 2000) / 1000;
+        }
 
         const severity = (pt => {
           if (pt === 0x01) return 'ok';

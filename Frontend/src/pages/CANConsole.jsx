@@ -112,14 +112,14 @@ function CANConsole() {
     try {
       const data = await pcanApi.initialize(channel, baudrate);
       if (data.payload?.packet_status === 'success') {
-        pushLog('success', data.payload.data || 'PCAN initialized');
+        pushLog('success', data.payload.result?.message || 'PCAN initialized');
         setConnected(true);
         setMessages([]);
         setMessageCounters({});
         setLastTimestamps({});
         startPolling();
       } else {
-        pushLog('error', data.payload?.data || 'Failed to initialize PCAN');
+        pushLog('error', data.payload.result?.message || 'Failed to initialize PCAN');
       }
     } catch (error) {
       pushLog('error', `Network error: ${error.message}`);
@@ -130,11 +130,11 @@ function CANConsole() {
     try {
       const data = await pcanApi.release();
       if (data.payload?.packet_status === 'success') {
-        pushLog('success', data.payload.data || 'PCAN released');
+        pushLog('success', data.payload.result?.message || 'PCAN released');
         setConnected(false);
         stopPolling();
       } else {
-        pushLog('error', data.payload?.data || 'Failed to release PCAN');
+        pushLog('error', data.payload.result?.message || 'Failed to release PCAN');
       }
     } catch (error) {
       pushLog('error', `Network error: ${error.message}`);
@@ -162,9 +162,9 @@ function CANConsole() {
     try {
       const data = await pcanApi.write(writeId, bytes.map(b => parseInt(b, 16)));
       if (data.payload?.packet_status === 'success') {
-        pushLog('success', data.payload.data || 'Frame sent successfully');
+        pushLog('success', data.payload.result?.message || 'Frame sent successfully');
       } else {
-        pushLog('error', data.payload?.data || 'Send failed');
+        pushLog('error', data.payload.result?.message || 'Send failed');
       }
     } catch (error) {
       pushLog('error', `Unable to send frame: ${error.message}`);
@@ -178,15 +178,23 @@ function CANConsole() {
     }
 
     try {
-      const data = await pcanApi.saveData(messageBuffer);
+      const filteredData = messageBuffer.map(msg => {
+        const date = new Date(msg.timestamp);
+        const offset = date.getTimezoneOffset() * 60000;
+        const localISOTime = new Date(date.getTime() - offset).toISOString().slice(0, -1);
+        return {
+          id: msg.id, data: msg.data, timestamp: localISOTime
+        };
+      });
+      const data = await pcanApi.saveData(filteredData);
       if (data.payload?.packet_status === 'success') {
-        pushLog('success', data.payload.data || 'Data saved successfully');
+        pushLog('success', data.payload.result?.message || 'Data saved successfully');
         setMessageBuffer([]);
         setMessages([]);
         setMessageCounters({});
         setLastTimestamps({});
       } else {
-        pushLog('error', data.payload?.data || 'Failed to save data');
+        pushLog('error', data.payload.result?.message || 'Failed to save data');
       }
     } catch (error) {
       pushLog('error', `Error saving data: ${error.message}`);
