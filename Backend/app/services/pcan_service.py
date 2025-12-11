@@ -5,6 +5,8 @@ import threading
 import time
 import json
 from datetime import datetime
+import io
+import csv
 from collections import deque
 
 # Add root directory to path to import PCANBasic
@@ -58,7 +60,15 @@ class PCANService:
         self.recording = False
         self.record_path = os.path.join(root_dir, 'tpms_streamed_data.json')
         self.stream_file = None
+        self.stream_file = None
         self.first_message = True
+        
+        # Timer / Sequencer state
+        self.timer_running = False
+        self.timer_thread: Optional[threading.Thread] = None
+        self.timer_logs = deque(maxlen=1000)
+        self.timer_response_buffer = deque(maxlen=1000)
+        self.stop_timer_event = threading.Event()
         
         # Try to instantiate PCANBasic if available
         if PCANBasic is not None:
@@ -405,7 +415,7 @@ class PCANService:
         try:
             # Parse message ID
             can_id = int(msg_id, 16)
-            is_extended = extended or (can_id > 0x7FF) or (len(msg_id) > 3)
+            is_extended = extended or (can_id > 0x7FF)
             
             # Create CAN message
             can_msg = TPCANMsg()
@@ -486,6 +496,10 @@ class PCANService:
                             }
                             self.read_buffer.append(item)
                             
+                            # If timer sequence is running, also feed the response buffer
+                            if self.timer_running:
+                                self.timer_response_buffer.append(item)
+                            
                             # Stream to file if recording
                             if self.recording and self.stream_file:
                                 try:
@@ -533,5 +547,238 @@ class PCANService:
                 return int(ts)
             except Exception:
                 return 0
+
+    # Timer / Sequencer Methods
+    def start_timer_sequence(self, mode: str, data: Any, default_interval: int = 2000, base_id: int = 1280) -> Dict[str, Any]:
+        """
+        Starts the timer write sequence in a separate thread.
+        mode: 'manual' or 'csv'
+        data: string (manual input or csv content)
+        default_interval: ms
+        base_id: Base Transmission CAN ID to calculate response IDs (Base + 129, Base + 130)
+        """
+        if self.timer_running:
+            return {"success": False, "error": "Timer sequence already running"}
+
+        try:
+            commands = self._parse_commands(data, default_interval)
+            if not commands:
+                return {"success": False, "error": "No valid commands found in input"}
+            
+            self.timer_running = True
+            self.stop_timer_event.clear()
+            self.timer_logs.clear()
+            self.timer_response_buffer.clear()
+            
+            self.timer_thread = threading.Thread(
+                target=self._timer_write_loop, 
+                args=(commands, base_id), 
+                daemon=True
+            )
+            self.timer_thread.start()
+            
+            return {"success": True, "message": f"Started sequence with {len(commands)} commands"}
+        except Exception as e:
+            self.timer_running = False
+            return {"success": False, "error": str(e)}
+
+    def stop_timer_sequence(self) -> Dict[str, Any]:
+        if not self.timer_running:
+            return {"success": False, "error": "Timer sequence not running"}
+        
+        self.stop_timer_event.set()
+        if self.timer_thread:
+            self.timer_thread.join(timeout=2.0)
+        
+        self.timer_running = False
+        return {"success": True, "message": "Timer sequence stopped"}
+
+    def get_timer_logs(self) -> Dict[str, Any]:
+        return {
+            "logs": list(self.timer_logs),
+            "running": self.timer_running
+        }
+
+    def _parse_commands(self, data: str, default_interval: int) -> list:
+        # User requirement: "if untick manual mode were take every coumn separated by comma"
+        # "each new line is new command"
+        # Format similar to CSV: ID, CmdType, Payload, Interval, Repeat
+        
+        commands = []
+        # Use csv module to handle comma splitting correctly
+        f = io.StringIO(data.strip())
+        reader = csv.reader(f)
+        
+        row_idx = 1
+        for row in reader:
+            if not row or all(x.strip() == '' for x in row): 
+                continue
+                
+            # Skip header if it looks like one (simple heuristic or just assume no header in manual?)
+            # The python script skips the first row of the CSV file.
+            # In manual mode, user might just paste raw data.
+            # We'll assume NO header for manual, or let user handle it. 
+            # But the user said "input ui at left side give plan @[06_TimerWrite_CSV.py]"
+            # The referenced script expects a header.
+            # We will NOT skip automatically unless we are sure. 
+            # Best effort: try to parse ID as hex/int. If fail, skip (it's a header).
+            
+            try:
+                # 1. ID
+                id_str = row[0].strip() if len(row) > 0 else "0"
+                if id_str.lower() in ['id', 'can_id', 'command']: # Header detection
+                    continue
+                can_id = int(id_str, 0) # Handles 0x prefix
+                
+                # 2. CmdType (2 bytes)
+                cmd_str = row[1].strip() if len(row) > 1 else "0"
+                cmd_bytes = self._parse_hex_bytes(cmd_str, 2)
+                
+                # 3. Payload (6 bytes)
+                pay_str = row[2].strip() if len(row) > 2 else "0"
+                pay_bytes = self._parse_hex_bytes(pay_str, 6)
+                
+                full_data = cmd_bytes + pay_bytes
+                
+                # 4. Interval
+                try:
+                    interval = int(row[3].strip()) if len(row) > 3 and row[3].strip() else default_interval
+                except:
+                    interval = default_interval
+                    
+                # 5. Repeat
+                try:
+                    repeat_val = int(row[4].strip()) if len(row) > 4 and row[4].strip() else 1
+                except:
+                    repeat_val = 1
+                
+                if repeat_val <= 0: repeat_val = 1
+                    
+                commands.append({
+                    "id": can_id,
+                    "data": full_data,
+                    "interval": interval,
+                    "repeat": repeat_val
+                })
+                row_idx += 1
+            except Exception as e:
+                print(f"Skipping row {row_idx}: {e}")
+                pass
+                
+        return commands
+
+    def _parse_hex_bytes(self, val_str: str, expected_bytes: int) -> list:
+        # Same logic as python script
+        if not val_str: return [0] * expected_bytes
+        try:
+            val_int = int(val_str, 0)
+        except:
+            return [0] * expected_bytes
+            
+        try:
+            byte_data = val_int.to_bytes(expected_bytes, byteorder='big')
+        except OverflowError:
+            mask = (1 << (expected_bytes * 8)) - 1
+            val_int &= mask
+            byte_data = val_int.to_bytes(expected_bytes, byteorder='big')
+            
+        return list(byte_data)
+
+    def _timer_write_loop(self, commands, base_id):
+        self.timer_logs.append({
+            "type": "info",
+            "message": "Starting Sequence...",
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Calculate allowed response IDs based on base_id 
+        # Script says: allowed_response_ids = [1280 + 129, 1280 + 130] if base is 1280
+        # So generic formula:
+        resp_id_1 = base_id + 129
+        resp_id_2 = base_id + 130
+        allowed_response_ids = [resp_id_1, resp_id_2]
+        
+        recv_stats = {rid: 0 for rid in allowed_response_ids}
+        all_received_msgs = []
+
+        try:
+            for cmd in commands:
+                if self.stop_timer_event.is_set(): break
+                
+                can_id = cmd['id']
+                data = cmd['data']
+                interval_ms = cmd['interval']
+                repeat_count = cmd['repeat']
+                
+                for i in range(repeat_count):
+                    if self.stop_timer_event.is_set(): break
+
+                    # Send
+                    res = self.write_message(hex(can_id), data)
+                    
+                    # Log Send
+                    hex_data_str = ' '.join([f"{b:02X}" for b in data])
+                    if res['success']:
+                        self.timer_logs.append({
+                            "type": "sent",
+                            "message": f"Sent: ID=0x{can_id:X} Data={hex_data_str}",
+                            "timestamp": datetime.now().isoformat()
+                        })
+                    else:
+                        self.timer_logs.append({
+                            "type": "error",
+                            "message": f"Failed Sent: {res.get('error')}",
+                            "timestamp": datetime.now().isoformat()
+                        })
+
+                    # Wait and Poll
+                    start_time = time.time()
+                    wait_sec = interval_ms / 1000.0
+                    
+                    while (time.time() - start_time) < wait_sec:
+                        if self.stop_timer_event.is_set(): break
+                        
+                        # Check response buffer
+                        # We process all available messages in buffer to see if any match
+                        while len(self.timer_response_buffer) > 0:
+                            msg = self.timer_response_buffer.popleft() # Consume
+                            # Check ID
+                            try:
+                                msg_id_int = int(msg['id'], 16)
+                                if msg_id_int in allowed_response_ids:
+                                    # Collect Response (Don't log immediately)
+                                    # We need to capture the SentID (can_id) here.
+                                    # Since we are in the loop of processing 'cmd', 'can_id' is available.
+                                    data_str = " ".join([f"{x:02X}" for x in msg['data']])
+                                    all_received_msgs.append({
+                                        "sent_id": f"0x{can_id:X}",
+                                        "response_id": f"0x{msg_id_int:X}",
+                                        "data": data_str
+                                    })
+                                    recv_stats[msg_id_int] += 1
+                            except:
+                                pass
+                        
+                        time.sleep(0.01)
+            
+            self.timer_logs.append({
+                "type": "info",
+                "message": "Sequence Finished",
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # User requested to NOT show the summary table or listened data.
+            # Code for table generation removed.
+
+
+            
+        except Exception as e:
+            self.timer_logs.append({
+                "type": "error",
+                "message": f"Sequence Error: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            })
+        finally:
+            self.timer_running = False
 
 pcan_service = PCANService()

@@ -22,6 +22,18 @@ function CANConsole() {
   const [isMockMode, setIsMockMode] = useState(false);
   const [mockData, setMockData] = useState(null);
 
+  // Timer Write State
+  const [timerMode, setTimerMode] = useState('csv'); // Default to CSV
+  const [manualCommand, setManualCommand] = useState('');
+  const [csvFileContent, setCsvFileContent] = useState('');
+  const [csvFileName, setCsvFileName] = useState('');
+  const [timerInterval, setTimerInterval] = useState(2000);
+  const [baseId, setBaseId] = useState(1280);
+  const [timerRunning, setTimerRunning] = useState(false);
+  const [timerLogs, setTimerLogs] = useState([]);
+  const timerLogTimerRef = useRef(null);
+  const [timerStatusMessage, setTimerStatusMessage] = useState('');
+
   const pollTimerRef = useRef(null);
   const MAX_BUFFER_SIZE = 1000;
 
@@ -48,6 +60,62 @@ function CANConsole() {
       clearInterval(pollTimerRef.current);
       pollTimerRef.current = null;
     }
+  }, []);
+
+  // Timer Log Polling
+  const startTimerLogPolling = useCallback(() => {
+    if (timerLogTimerRef.current) clearInterval(timerLogTimerRef.current);
+    timerLogTimerRef.current = setInterval(async () => {
+      try {
+        const res = await pcanApi.getTimerLogs();
+        if (res.payload?.data) {
+          const { logs, running } = res.payload.data;
+          // Handle both old list format (fallback) or new object format
+          const logList = Array.isArray(res.payload.data) ? res.payload.data : (logs || []);
+          const isRunning = typeof running === 'boolean' ? running : false;
+
+          setTimerLogs(logList);
+
+          if (!isRunning && logList.length > 0) {
+            setTimerRunning(false);
+            setTimerStatusMessage("Finished.");
+            // Don't stop polling immediately so we see the final log, or stop after short delay
+            // For now, let's keep polling or stop? 
+            // If we stop polling, we might miss the very last "Finished" log if timing is tight.
+            // Better to just update state.
+          }
+        }
+      } catch (e) {
+        console.error("Failed to fetch timer logs", e);
+      }
+    }, 500);
+  }, []);
+
+  const stopTimerLogPolling = useCallback(() => {
+    if (timerLogTimerRef.current) {
+      clearInterval(timerLogTimerRef.current);
+      timerLogTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => stopTimerLogPolling();
+  }, [stopTimerLogPolling]);
+
+  // Load default CSV on mount
+  useEffect(() => {
+    const loadDefaultCsv = async () => {
+      try {
+        const res = await pcanApi.getDefaultCsv();
+        if (res.payload?.packet_status === 'success' && res.payload.data) {
+          setCsvFileContent(res.payload.data);
+          setCsvFileName("commands.csv");
+        }
+      } catch (e) {
+        console.error("Failed to load default CSV", e);
+      }
+    };
+    loadDefaultCsv();
   }, []);
 
   const fetchMessage = async () => {
@@ -286,6 +354,60 @@ function CANConsole() {
     reader.readAsText(file);
   };
 
+  const handleTimerCsvUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setCsvFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      setCsvFileContent(event.target.result);
+    };
+    reader.readAsText(file);
+  };
+
+  const handleStartTimer = async () => {
+    if (!connected) {
+      setTimerStatusMessage("Error: PCAN not connected");
+      return;
+    }
+
+    setTimerStatusMessage("Starting...");
+    setTimerLogs([]);
+
+    const dataToSend = timerMode === 'csv' ? csvFileContent : manualCommand;
+    if (!dataToSend || dataToSend.trim() === '') {
+      setTimerStatusMessage("Error: No data to send");
+      return;
+    }
+
+    try {
+      const res = await pcanApi.startTimerSequence(timerMode, dataToSend, timerInterval, baseId);
+      console.log("Timer Start Response:", res);
+      if (res.payload?.packet_status === 'success') {
+        setTimerRunning(true);
+        setTimerStatusMessage("Running...");
+        startTimerLogPolling();
+      } else {
+        const errMsg = res.payload?.result?.message || res.detail || (typeof res === 'string' ? res : 'Failed to start');
+        setTimerStatusMessage(`Error: ${errMsg}`);
+      }
+    } catch (e) {
+      console.error("Timer Start Exception:", e);
+      setTimerStatusMessage(`Error: ${e.message}`);
+    }
+  };
+
+  const handleStopTimer = async () => {
+    try {
+      await pcanApi.stopTimerSequence();
+      setTimerRunning(false);
+      setTimerStatusMessage("Stopped.");
+      stopTimerLogPolling();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   useEffect(() => {
     // Check initial connection status
     pcanApi.getStatus().then(res => {
@@ -402,6 +524,104 @@ function CANConsole() {
               </button>
             </div>
           </form>
+        </section>
+
+        <section className="card" style={{ gridColumn: '1 / -1' }}>
+          <header>
+            <h2>CAN Configuration & Timer Write</h2>
+          </header>
+          <div className="timer-config-container" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+            <div className="input-section">
+              <div style={{ marginBottom: '15px' }}>
+                <label className="checkbox-item" style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={timerMode === 'csv'}
+                    onChange={(e) => setTimerMode(e.target.checked ? 'csv' : 'manual')}
+                    style={{ width: '20px', height: '20px' }}
+                  />
+                  <span>Use CSV File</span>
+                </label>
+              </div>
+
+              {timerMode === 'csv' ? (
+                <div className="field">
+                  <span>Select CSV File</span>
+                  <input type="file" accept=".csv" onChange={handleTimerCsvUpload} />
+                  {csvFileName && <p style={{ fontSize: '12px', marginTop: '5px' }}>Selected (Default) : {csvFileName}</p>}
+                </div>
+              ) : (
+                <div className="field">
+                  <span>Manual Command (ID, CmdType, Payload...)</span>
+                  <textarea
+                    value={manualCommand}
+                    onChange={(e) => setManualCommand(e.target.value)}
+                    rows={5}
+                    style={{
+                      width: '100%',
+                      background: 'rgba(0,0,0,0.2)',
+                      border: '1px solid var(--border)',
+                      color: 'var(--text)',
+                      padding: '10px',
+                      fontFamily: 'monospace'
+                    }}
+                    placeholder="ID, CmdType, Payload, TimerInterval, Repeat"
+                  />
+                  <p className="hint">Format: ID, CmdType(2), Payload(6), Interval(opt), Repeat(opt)</p>
+                </div>
+              )}
+
+              <div className="field-grid-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                <div className="field">
+                  <span>Default Interval (ms)</span>
+                  <input
+                    type="number"
+                    value={timerInterval}
+                    onChange={(e) => setTimerInterval(parseInt(e.target.value) || 0)}
+                  />
+                </div>
+                <div className="field">
+                  <span>Base Transmission ID (dec)</span>
+                  <input
+                    type="number"
+                    value={baseId}
+                    onChange={(e) => setBaseId(parseInt(e.target.value) || 0)}
+                  />
+                </div>
+              </div>
+
+              <div className="button-row" style={{ marginTop: '20px' }}>
+                {!timerRunning ? (
+                  <button className="primary" onClick={handleStartTimer} disabled={!connected}>Start Sending</button>
+                ) : (
+                  <button className="danger" onClick={handleStopTimer} style={{ background: '#ff5c6a', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '12px', fontWeight: 'bold', cursor: 'pointer' }}>Stop Sending</button>
+                )}
+                <span style={{ marginLeft: '10px', alignSelf: 'center', fontSize: '14px', color: 'var(--accent)' }}>{timerStatusMessage}</span>
+              </div>
+            </div>
+
+            <div className="log-section">
+              <h3 style={{ marginTop: 0, marginBottom: '10px', fontSize: '16px', color: 'var(--muted)' }}>Sequence Log</h3>
+              <div className="timer-log-box" style={{
+                height: '300px',
+                overflowY: 'auto',
+                background: '#080b16',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                padding: '10px',
+                fontFamily: 'monospace',
+                fontSize: '12px'
+              }}>
+                {timerLogs.length === 0 && <span style={{ color: 'var(--muted)' }}>Logs will appear here...</span>}
+                {timerLogs.map((log, idx) => (
+                  <div key={idx} style={{ marginBottom: '4px', color: log.type === 'error' ? '#ff5c6a' : log.type === 'sent' ? '#5cc8ff' : log.type === 'recv' ? '#29d98c' : 'var(--text)' }}>
+                    <span style={{ color: 'var(--muted)', marginRight: '8px' }}>[{log.timestamp.split('T')[1].split('.')[0]}]</span>
+                    {log.message}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
         </section>
 
         <section className="card">

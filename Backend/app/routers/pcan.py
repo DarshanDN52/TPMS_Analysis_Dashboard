@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from Backend.app.schemas.pcan import InitRequest, WriteRequest, SaveDataRequest, CommandResponse, ResponsePayload, Result
+from pydantic import BaseModel
+from typing import Optional, Any
 from Backend.app.services.pcan_service import pcan_service
 import json
 import os
@@ -190,6 +192,100 @@ async def save_data(request: SaveDataRequest):
                     status="error",
                     message=str(e)
                 ),
+                data="",
+                packet_status="failed"
+            )
+        )
+
+
+class TimerStartRequest(BaseModel):
+    mode: str # 'manual' or 'csv'
+    data: str
+    interval: Optional[int] = 2000
+    base_id: Optional[int] = 1280
+
+@router.post("/pcan/timer/start", response_model=CommandResponse)
+async def start_timer(request: TimerStartRequest):
+    result = pcan_service.start_timer_sequence(request.mode, request.data, request.interval, request.base_id)
+    return CommandResponse(
+        command="TIMER_START",
+        payload=ResponsePayload(
+            result=Result(
+                status="ok" if result["success"] else "error",
+                message=result.get("message", result.get("error", ""))
+            ),
+            data="",
+            packet_status="success" if result["success"] else "failed"
+        )
+    )
+
+@router.post("/pcan/timer/stop", response_model=CommandResponse)
+async def stop_timer():
+    result = pcan_service.stop_timer_sequence()
+    return CommandResponse(
+        command="TIMER_STOP",
+        payload=ResponsePayload(
+            result=Result(
+                status="ok" if result["success"] else "error",
+                message=result.get("message", result.get("error", ""))
+            ),
+            data="",
+            packet_status="success" if result["success"] else "failed"
+        )
+    )
+
+@router.get("/pcan/timer/logs", response_model=CommandResponse)
+async def get_timer_logs():
+    data = pcan_service.get_timer_logs()
+    return CommandResponse(
+        command="TIMER_LOGS",
+        payload=ResponsePayload(
+            result=Result(status="ok", message="Logs retrieved"),
+            data=data, # Now a dict {logs: [], running: bool}
+            packet_status="success"
+        )
+    )
+
+@router.get("/pcan/timer/default-csv", response_model=CommandResponse)
+async def get_default_csv():
+    # Attempt to find commands.csv in project root
+    # Backend/app/routers/pcan.py -> ... -> Project Root
+    root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    csv_path = os.path.join(root_dir, 'commands.csv')
+
+    # Fallback to specific user path if calculation fails
+    if not os.path.exists(csv_path):
+        # Specific path requested by user
+        explicit_path = r"D:\internship\TPMS_Analysis_Dashboard\commands.csv"
+        if os.path.exists(explicit_path):
+            csv_path = explicit_path
+    
+    if os.path.exists(csv_path):
+        try:
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return CommandResponse(
+                command="GET_DEFAULT_CSV",
+                payload=ResponsePayload(
+                    result=Result(status="ok", message="Default CSV loaded"),
+                    data=content,
+                    packet_status="success"
+                )
+            )
+        except Exception as e:
+            return CommandResponse(
+                command="GET_DEFAULT_CSV",
+                payload=ResponsePayload(
+                    result=Result(status="error", message=f"Failed to read file: {str(e)}"),
+                    data="",
+                    packet_status="failed"
+                )
+            )
+    else:
+        return CommandResponse(
+            command="GET_DEFAULT_CSV",
+            payload=ResponsePayload(
+                result=Result(status="error", message="commands.csv not found in root"),
                 data="",
                 packet_status="failed"
             )

@@ -89,6 +89,34 @@ export const pcanApi = {
       })
     });
     return response.json();
+    return response.json();
+  },
+
+  async startTimerSequence(mode, data, interval, baseId) {
+    const response = await fetch(`${API_BASE}/pcan/timer/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, data, interval, base_id: baseId })
+    });
+    return response.json();
+  },
+
+  async stopTimerSequence() {
+    const response = await fetch(`${API_BASE}/pcan/timer/stop`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    return response.json();
+  },
+
+  async getTimerLogs() {
+    const response = await fetch(`${API_BASE}/pcan/timer/logs`);
+    return response.json();
+  },
+
+  async getDefaultCsv() {
+    const response = await fetch(`${API_BASE}/pcan/timer/default-csv`);
+    return response.json();
   }
 };
 
