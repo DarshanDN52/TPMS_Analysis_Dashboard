@@ -8,6 +8,7 @@ from datetime import datetime
 import io
 import csv
 from collections import deque
+import re
 
 # Add root directory to path to import PCANBasic
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -58,7 +59,10 @@ class PCANService:
         
         # Streaming state
         self.recording = False
-        self.record_path = os.path.join(root_dir, 'tpms_streamed_data.json')
+        self.base_path = os.path.join(root_dir, 'Data')
+        if not os.path.exists(self.base_path):
+            os.makedirs(self.base_path)
+        self.record_path = os.path.join(self.base_path, 'tpms_streamed_data.json')
         self.stream_file = None
         self.stream_file = None
         self.first_message = True
@@ -97,10 +101,13 @@ class PCANService:
             'PCAN_BAUD_250K': PCAN_BAUD_250K,
             'PCAN_BAUD_125K': PCAN_BAUD_125K,
             'PCAN_BAUD_100K': PCAN_BAUD_100K,
-            'PCAN_BAUD_50K': PCAN_BAUD_50K,
             'PCAN_BAUD_20K': PCAN_BAUD_20K,
             'PCAN_BAUD_10K': PCAN_BAUD_10K,
         }
+        
+        # Identifier Statistics
+        self.session_stats = {}
+        self.session_start_time = None
     
     def initialize(self, channel: str, baudrate: str) -> Dict[str, Any]:
         try:
@@ -135,6 +142,11 @@ class PCANService:
                 self.channel = channel
                 self.baudrate = baudrate
                 self.message_counter = 0
+                
+                # Reset Stats
+                self.session_stats = {}
+                self.session_start_time = datetime.now().isoformat()
+                
                 try:
                     self.pcan.SetValue(pcan_channel, PCAN_MESSAGE_FILTER, PCAN_FILTER_OPEN)
                 except Exception:
@@ -167,42 +179,102 @@ class PCANService:
                     pass
                 
                 # Start recording to file
+                # Start recording to file
                 try:
                     # Check if file exists to determine if we need to start array or append
                     file_exists = os.path.exists(self.record_path)
                     
+                    start_new_session = False
+                    
                     if file_exists:
-                        # If file exists, we need to remove the trailing ']' to append
                         try:
                             with open(self.record_path, 'rb+') as f:
+                                # Inspect the end of the file to determine state
                                 f.seek(0, os.SEEK_END)
-                                pos = f.tell()
-                                if pos > 1:
-                                    # Search backwards for the last ']'
-                                    # This is a simple assumption that the file ends with '}\n]' or '}' or ']'
-                                    # We will just remove the last byte if it is ']'
-                                    # A safer way is ensuring we always write ']' on release. 
-                                    # So we remove the last char.
-                                    f.seek(-1, os.SEEK_END)
-                                    char = f.read(1)
-                                    if char == b']':
-                                        f.seek(-1, os.SEEK_END)
+                                file_size = f.tell()
+                                
+                                if file_size > 5: # Minimal size check
+                                    # Scan backwards for last non-whitespace char
+                                    # We'll read the last ~50 bytes to be safe
+                                    read_len = min(50, file_size)
+                                    f.seek(-read_len, os.SEEK_END)
+                                    tail = f.read(read_len)
+                                    
+                                    # Find the last significant character
+                                    last_char = None
+                                    trim_len = 0
+                                    for i in range(len(tail) - 1, -1, -1):
+                                        char = tail[i:i+1] # byte
+                                        if char.strip():
+                                            last_char = char
+                                            break
+                                        trim_len += 1
+                                    
+                                    # Logic based on last char
+                                    if last_char == b']':
+                                        # Properly closed file. Expected: [ ... { ... } ]
+                                        # We want to open it up: Remove ']'
+                                        # Write ','
+                                        # Start new session
+                                        
+                                        # Calculate truncate position: FileSize - TrimLen - 1 (the ']')
+                                        # Or simpler: just find the index of that ']' relative to end
+                                        
+                                        # Re-seek to exact byte of ']'
+                                        pos_of_last_char = file_size - (len(tail) - tail.rfind(b']')) 
+                                        f.seek(pos_of_last_char) 
                                         f.truncate()
-                                        needs_comma = True
+                                        
+                                        # We are now at `... { ... }` (end of array)
+                                        # We need to add ',' before starting new session
+                                        self.stream_file = open(self.record_path, 'a')
+                                        self.stream_file.write(',\n')
+                                        
+                                    elif last_char == b'}':
+                                        # Message written but Session NOT closed (Crash inside messages array)
+                                        # Structure: [ { "messages": [ {msg}
+                                        # We need to close messages array ']' and session object '}'
+                                        # Then ','
+                                        
+                                        # We append closure to the END (after last char)
+                                        self.stream_file = open(self.record_path, 'a')
+                                        self.stream_file.write(']\n  },\n  ,\n')
+                                        
+                                    elif last_char == b',':
+                                        # Message written, comma added, then CRASH.
+                                        # Structure: [ { "messages": [ {msg},
+                                        # Remove trailing comma first? Or just append empty?
+                                        # Better to remove it to be clean, or just append `] }`?
+                                        # `[ {msg}, ]` is invalid JSON.
+                                        # So we MUST remove the comma.
+                                        
+                                        pos_of_comma = file_size - (len(tail) - tail.rfind(b','))
+                                        f.seek(pos_of_comma)
+                                        f.truncate()
+                                        
+                                        # Now we are at `... {msg}`. Same as '} case.
+                                        self.stream_file = open(self.record_path, 'a')
+                                        self.stream_file.write(']\n  },\n  ,\n')
+
                                     else:
-                                        # File might be corrupted or empty array
-                                        needs_comma = False
+                                        # Unknown state (maybe empty array '['?). Assume reset or just append?
+                                        # If it's valid JSON, we shouldn't be here unless it's empty `[`
+                                        # If `[`, we don't need comma.
+                                        self.stream_file = open(self.record_path, 'a')
+                                        # If file ends in '[', no comma needed. If corrupted, this might break.
+                                        # Let's assume if it's not ] } , it might be start.
+                                        pass 
+                                        
                                 else:
-                                    needs_comma = False
-                        except Exception:
-                            # If binary edit fails, maybe file is locked, risky fallback
-                            needs_comma = False
-                            
-                        self.stream_file = open(self.record_path, 'a')
-                        if needs_comma:
-                            self.stream_file.write(',\n')
+                                    # Tiny file, overwrite
+                                    start_new_session = True
+                        except Exception as e:
+                            print(f"Repair failed: {e}. Overwriting.")
+                            start_new_session = True
                     else:
-                        # New file, start array
+                        start_new_session = True
+
+                    if start_new_session:
                         self.stream_file = open(self.record_path, 'w')
                         self.stream_file.write('[\n')
                     
@@ -266,6 +338,18 @@ class PCANService:
                         pass
                     self.stream_file = None
                     self.recording = False
+
+                # Save Identifier Stats
+                if self.session_stats and self.session_start_time:
+                    try:
+                        payload = {
+                            "startTime": self.session_start_time,
+                            "endTime": datetime.now().isoformat(),
+                            "stats": self.session_stats
+                        }
+                        self.save_identifier_stats(payload)
+                    except Exception as e:
+                        print(f"Failed to auto-save stats: {e}")
 
                 result = self.pcan.Uninitialize(self.channel_map[self.channel])
                 self.initialized = False
@@ -530,6 +614,36 @@ class PCANService:
                             if self.timer_running:
                                 self.timer_response_buffer.append(item)
                             
+                            # Identifier Stats Aggregation
+                            try:
+                                # Target ID for TPMS is typically BaseID (0x500) + 2 = 0x502 (1282)
+                                if can_msg.ID == 0x502 and len(data) >= 2:
+                                    sensor_id = data[0] & 0xFF
+                                    tire_index = sensor_id + 1
+                                    packet_type = data[1] & 0xFF
+                                    
+                                    # Standard Mapping
+                                    PACKET_TYPE_NAMES = {
+                                        0x01: "Normal",
+                                        0x02: "Auto",
+                                        0x03: "Warning", 
+                                        0x04: "P-Off",
+                                        0x10: "Low P",
+                                        0x11: "High P"
+                                    }
+                                    # Fallback to hex string if unknown
+                                    pt_name = PACKET_TYPE_NAMES.get(packet_type, f"0x{packet_type:02X}")
+                                    
+                                    # Use string key for JSON compatibility? No, int is fine for dict, JSON dumps converts to string keys.
+                                    if tire_index not in self.session_stats:
+                                        self.session_stats[tire_index] = {"total": 0, "types": {}}
+                                    
+                                    self.session_stats[tire_index]["total"] += 1
+                                    pt_types = self.session_stats[tire_index]["types"]
+                                    pt_types[pt_name] = pt_types.get(pt_name, 0) + 1
+                            except Exception:
+                                pass
+                            
                             # Stream to file if recording
                             if self.recording and self.stream_file:
                                 try:
@@ -787,6 +901,12 @@ class PCANService:
                                         "time": datetime.now().strftime("%H:%M:%S.%f")[:-3]
                                     })
                                     recv_stats[msg_id_int] += 1
+                                    # Real-time Logging
+                                    self.timer_logs.append({
+                                        "type": "recv",
+                                        "message": f"Recv: 0x{msg_id_int:X} | Data: {data_str} | Time: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}",
+                                        "timestamp": datetime.now().isoformat()
+                                    })
                             except:
                                 pass
                         
@@ -820,6 +940,12 @@ class PCANService:
                                 "data": data_str,
                                 "time": datetime.now().strftime("%H:%M:%S.%f")[:-3]
                             })
+                            # Real-time Logging
+                            self.timer_logs.append({
+                                "type": "recv",
+                                "message": f"Recv: 0x{msg_id_int:X} | Data: {data_str} | Time: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}",
+                                "timestamp": datetime.now().isoformat()
+                            })
                      except:
                         pass
                 time.sleep(0.01)
@@ -849,14 +975,7 @@ class PCANService:
                     "message": f"Listening Duration: {duration_sec:.2f}s | Expected: {total_expected} | Recv: {total_received}",
                     "timestamp": datetime.now().isoformat()
                 })
-                
-                for msg in all_received_msgs:
-                    # User requested 'Recv: 0x581 | Data: ...' (Time optional? I will keep time as it's useful)
-                    self.timer_logs.append({
-                        "type": "recv",
-                        "message": f"Recv: {msg['response_id']} | Data: {msg['data']} | Time: {msg.get('time', '-')}",
-                        "timestamp": datetime.now().isoformat()
-                    })
+                # Batch loop removed - logged in real-time
             else:
                  self.timer_logs.append({
                     "type": "info",
@@ -878,5 +997,66 @@ class PCANService:
             })
         finally:
             self.timer_running = False
+
+    def save_identifier_stats(self, data):
+        """
+        Appends identifier statistics to identifier_stats.json
+        Data format: { "startTime": "...", "endTime": "...", "stats": { ... } }
+        """
+        stats_file = os.path.join(self.base_path, 'identifier_stats.json')
+        print(f"Saving identifier stats to: {stats_file}")
+        
+        try:
+            existing_data = []
+            if os.path.exists(stats_file):
+                try:
+                    with open(stats_file, 'r') as f:
+                        file_content = f.read().strip()
+                        if file_content:
+                            existing_data = json.loads(file_content)
+                except json.JSONDecodeError:
+                    print("Error decoding identifier_stats.json, starting fresh.")
+                    existing_data = []
+            
+            # Ensure it's a list
+            if not isinstance(existing_data, list):
+                existing_data = []
+                
+            existing_data.append(data)
+            
+            # Formatted Dump
+            json_str = json.dumps(existing_data, indent=2)
+            
+            # Post-process to collapse tire stats into single lines
+            # Target pattern: "1": { \n "total": X, \n "types": { ... } \n }
+            
+            # Step 1: Collapse "types" objects
+            # Pattern matches: "types": { ... } spanning multiple lines
+            json_str = re.sub(
+                r'("types": )\{\s+([^}]+)\s+\}',
+                lambda m: f'{m.group(1)}{{ { " ".join(m.group(2).split()) } }}',
+                json_str
+            )
+            
+            # Step 2: Collapse the parent tire object
+            def collapse_tire_obj(match):
+                key_part = match.group(1)
+                content = match.group(2)
+                collapsed_content = ' '.join(content.split())
+                return f'{key_part}{{ {collapsed_content} }}'
+
+            json_str = re.sub(
+                r'("\d+": )\{\s+(.*?)\s+\}',
+                collapse_tire_obj,
+                json_str,
+                flags=re.DOTALL
+            )
+            
+            with open(stats_file, 'w') as f:
+                f.write(json_str)
+                
+            return {"success": True, "message": "Stats saved successfully"}
+        except Exception as e:
+            return {"success": False, "message": f"Failed to save stats: {str(e)}"}
 
 pcan_service = PCANService()

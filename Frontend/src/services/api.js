@@ -75,7 +75,7 @@ export const pcanApi = {
     return response.json();
   },
 
-  async saveData(messages) {
+  async saveData(messages, filename = 'data.json') {
     const response = await fetch(`${API_BASE}/save-data`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -84,10 +84,12 @@ export const pcanApi = {
         payload: {
           id: '',
           bit_rate: '',
-          data: messages
+          data: messages,
+          filename: filename
         }
       })
     });
+    return response.json();
     return response.json();
     return response.json();
   },

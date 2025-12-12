@@ -17,7 +17,7 @@ function TPMSDashboard() {
   const detailChartInstanceRef = useRef(null);
 
   // Global Context
-  const { latestTireData, globalHistory, saveBuffer } = usePCAN();
+  const { latestTireData, globalHistory, packetStats, saveBuffer, startTime, baseId } = usePCAN();
 
   const [config, setConfig] = useState(() => {
     try {
@@ -41,7 +41,7 @@ function TPMSDashboard() {
 
   const handleSaveData = async () => {
     try {
-      const res = await saveBuffer();
+      const res = await saveBuffer('tpms_intermediate_data.json', { requiredId: baseId + 0x02 });
       if (res?.payload?.result?.status === 'ok') {
         alert(res.payload.result.message || "Saved successfully");
       } else {
@@ -439,9 +439,15 @@ function TPMSDashboard() {
           legend: { display: false }, // Hide default legend as requested
           tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(0, 0, 0, 0.8)', padding: 12, titleColor: '#f2f5ff', bodyColor: '#f2f5ff' },
           zoom: {
-            wheel: { enabled: true, speed: 0.1 },
-            pinch: { enabled: true },
-            mode: 'x',
+            pan: {
+              enabled: true,
+              mode: 'x',
+            },
+            zoom: {
+              wheel: { enabled: true, speed: 0.1 },
+              pinch: { enabled: true },
+              mode: 'x',
+            },
           },
         },
         scales: {
@@ -526,9 +532,15 @@ function TPMSDashboard() {
           legend: { display: false },
           tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(0, 0, 0, 0.8)', padding: 12 },
           zoom: {
-            wheel: { enabled: true, speed: 0.1 },
-            pinch: { enabled: true },
-            mode: 'x',
+            pan: {
+              enabled: true,
+              mode: 'x',
+            },
+            zoom: {
+              wheel: { enabled: true, speed: 0.1 },
+              pinch: { enabled: true },
+              mode: 'x',
+            },
           },
         },
         scales: {
@@ -684,10 +696,65 @@ function TPMSDashboard() {
             <div className="view-toggle">
               <button className={`view-btn ${view === 'top-view' ? 'active' : ''}`} onClick={() => setView('top-view')}>Top View</button>
               <button className={`view-btn ${view === 'data-view' ? 'active' : ''}`} onClick={() => setView('data-view')}>Data View</button>
+              <button className={`view-btn ${view === 'identifier-view' ? 'active' : ''}`} onClick={() => setView('identifier-view')}>Identifier</button>
             </div>
           </div>
 
-          {view === 'top-view' ? (
+          {view === 'identifier-view' ? (
+            <div className="identifier-view-container" style={{ padding: '20px', width: '100%', overflowX: 'auto' }}>
+              <div style={{ marginBottom: '10px', color: '#888', fontStyle: 'italic' }}>
+                Start Time: {startTime ? startTime.toLocaleTimeString() : '-'}
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', color: '#fff', fontSize: '14px' }}>
+                <thead>
+                  <tr style={{ background: '#252a41' }}>
+                    <th style={{ padding: '10px', textAlign: 'left' }}>Tire</th>
+                    <th style={{ padding: '10px', textAlign: 'left' }}>Sensor ID</th>
+                    <th style={{ padding: '10px', textAlign: 'left' }}>Total Packets</th>
+                    <th style={{ padding: '10px', textAlign: 'left' }}>01 (Normal)</th>
+                    <th style={{ padding: '10px', textAlign: 'left' }}>02 (History)</th>
+                    <th style={{ padding: '10px', textAlign: 'left' }}>03 (Not Found)</th>
+                    <th style={{ padding: '10px', textAlign: 'left' }}>04 (Inv Type)</th>
+                    <th style={{ padding: '10px', textAlign: 'left' }}>05 (Inv Mfr)</th>
+                    <th style={{ padding: '10px', textAlign: 'left' }}>10 (Low)</th>
+                    <th style={{ padding: '10px', textAlign: 'left' }}>11 (High)</th>
+                    <th style={{ padding: '10px', textAlign: 'left' }}>Other</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.keys(packetStats).length === 0 ? (
+                    <tr><td colSpan="11" style={{ padding: '20px', textAlign: 'center', color: '#888' }}>No data yet...</td></tr>
+                  ) : (
+                    Object.keys(packetStats).sort((a, b) => parseInt(a) - parseInt(b)).map(tireIdx => {
+                      const stats = packetStats[tireIdx];
+                      const types = stats.types || {};
+                      const otherCount = Object.keys(types).reduce((sum, key) => {
+                        const k = parseInt(key);
+                        if ([1, 2, 3, 4, 5, 16, 17].includes(k)) return sum; // Known types (16=0x10, 17=0x11)
+                        return sum + types[key];
+                      }, 0);
+
+                      return (
+                        <tr key={tireIdx} style={{ borderBottom: '1px solid #333' }}>
+                          <td style={{ padding: '10px' }}>Tire {tireIdx}</td>
+                          <td style={{ padding: '10px' }}>{parseInt(tireIdx) - 1}</td>
+                          <td style={{ padding: '10px' }}>{stats.total}</td>
+                          <td style={{ padding: '10px' }}>{types[1] || 0}</td>
+                          <td style={{ padding: '10px' }}>{types[2] || 0}</td>
+                          <td style={{ padding: '10px' }}>{types[3] || 0}</td>
+                          <td style={{ padding: '10px' }}>{types[4] || 0}</td>
+                          <td style={{ padding: '10px' }}>{types[5] || 0}</td>
+                          <td style={{ padding: '10px' }}>{types[16] || 0}</td>
+                          <td style={{ padding: '10px' }}>{types[17] || 0}</td>
+                          <td style={{ padding: '10px' }}>{otherCount}</td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : view === 'top-view' ? (
             <div className="truck-container-wrapper">
               <div className="truck-2d-view">
                 <div className="truck-body-container" style={truckStyle}>

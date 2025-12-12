@@ -23,6 +23,7 @@ class SaveDataPayload(BaseModel):
     id: Optional[str] = ""
     bit_rate: Optional[str] = ""
     data: List[Any]
+    filename: Optional[str] = "data.json"
 
 class SaveDataRequest(BaseModel):
     command: str

@@ -9,6 +9,14 @@ export function PCANProvider({ children }) {
     const [latestTireData, setLatestTireData] = useState({}); // Latest state for Dashboard
     // Global History for Graphs (Persists across navigation)
     const [globalHistory, setGlobalHistory] = useState({ pressure: {}, temperature: {}, battery: {} });
+    // Packet Statistics: { [tireIndex]: { total: 0, types: { [type]: count } } }
+    const [packetStats, setPacketStats] = useState({});
+
+    // Session Start Time
+    const [startTime, setStartTime] = useState(new Date());
+
+    // Filtering Configuration
+    const [baseId, setBaseId] = useState(1280); // Default 0x500 (1280 dec)
 
     // The master buffer for "Save Data" functionality.
     // We use a Ref because this can grow large and we don't want to trigger re-renders 
@@ -130,6 +138,11 @@ export function PCANProvider({ children }) {
                 setLatestTireData(prev => {
                     const next = { ...prev };
                     specificMessages.forEach(msg => {
+                        // FILTER: Only process IDs matching BaseID + 0x02
+                        // IDs are hex strings in 'msg.id'. baseId is decimal number.
+                        const msgIdDec = parseInt(msg.id, 16);
+                        if (msgIdDec !== baseId + 0x02) return;
+
                         const update = processTPMSPacket(msg);
                         if (update && update.tireIndex) {
                             const idx = update.tireIndex;
@@ -155,6 +168,10 @@ export function PCANProvider({ children }) {
                     const MAX_HISTORY = 50;
 
                     specificMessages.forEach(msg => {
+                        // FILTER: Only process IDs matching BaseID + 0x02
+                        const msgIdDec = parseInt(msg.id, 16);
+                        if (msgIdDec !== baseId + 0x02) return;
+
                         const update = processTPMSPacket(msg);
                         if (update && update.tireIndex && update.pressure !== undefined) {
                             // Only push if we have valid sensor data (Type 1, 16, 17)
@@ -173,6 +190,37 @@ export function PCANProvider({ children }) {
                         }
                     });
                     return nextHist;
+                });
+                // E. Update Packet Stats
+                setPacketStats(prev => {
+                    const next = { ...prev };
+                    specificMessages.forEach(msg => {
+                        // FILTER: Only process IDs matching BaseID + 0x02
+                        const msgIdDec = parseInt(msg.id, 16);
+                        if (msgIdDec !== baseId + 0x02) return;
+
+                        // We need bytes to get sensor ID / tire index
+                        let bytes;
+                        if (Array.isArray(msg.data)) bytes = msg.data;
+                        else if (typeof msg.data === 'string') bytes = msg.data.split(' ').map(h => parseInt(h, 16));
+
+                        if (!bytes || bytes.length < 2) return;
+
+                        const sensorId = bytes[0] & 0xFF;
+                        const tireIndex = sensorId + 1;
+                        const packetType = bytes[1] & 0xFF; // Keep as number (0x01, 0x02 etc)
+
+                        // Deep copy: Create new object for this tire if we modify it
+                        if (next[tireIndex]) {
+                            next[tireIndex] = { ...next[tireIndex], types: { ...next[tireIndex].types } };
+                        } else {
+                            next[tireIndex] = { total: 0, types: {} };
+                        }
+
+                        next[tireIndex].total = (next[tireIndex].total || 0) + 1;
+                        next[tireIndex].types[packetType] = (next[tireIndex].types[packetType] || 0) + 1;
+                    });
+                    return next;
                 });
             }
 
@@ -204,16 +252,74 @@ export function PCANProvider({ children }) {
         }).catch(() => { });
     }, []);
 
+    // Auto-Save Statistics
+    const triggerAutoSaveStats = useCallback(async () => {
+        // Only save if we have stats
+        if (Object.keys(packetStats).length === 0) return;
+
+        const payload = {
+            startTime: startTime.toISOString(),
+            endTime: new Date().toISOString(),
+            stats: packetStats
+        };
+
+        await pcanApi.saveIdentifierStats(payload);
+    }, [packetStats, startTime]);
+
+
+
+
+
+    // Track last saved index for each filename to support independent saving
+    const saveCursorsRef = useRef({});
+
     const clearData = () => {
+        // Save before clearing
+
         setMessages([]);
         rawMessageBufferRef.current = [];
+        saveCursorsRef.current = {}; // Reset cursors
         setLatestTireData({});
         setGlobalHistory({ pressure: {}, temperature: {}, battery: {} });
+        setPacketStats({});
+        setStartTime(new Date());
     };
 
-    const saveBuffer = async () => {
-        if (rawMessageBufferRef.current.length === 0) throw new Error("No data");
-        return await pcanApi.saveData(rawMessageBufferRef.current);
+    const saveBuffer = async (targetFilename = 'data.json', options = {}) => {
+        const fullBuffer = rawMessageBufferRef.current;
+        const totalLength = fullBuffer.length;
+
+        // Determine start index for this specific file
+        const startIdx = saveCursorsRef.current[targetFilename] || 0;
+
+        if (startIdx >= totalLength) {
+            throw new Error("No new data to save");
+        }
+
+        // Get only new messages
+        let newMessages = fullBuffer.slice(startIdx);
+
+        // Filter if required
+        if (options.requiredId) {
+            newMessages = newMessages.filter(msg => {
+                const msgId = parseInt(msg.id, 16);
+                return msgId === options.requiredId;
+            });
+        }
+
+        let res;
+        if (newMessages.length > 0) {
+            res = await pcanApi.saveData(newMessages, targetFilename);
+        } else {
+            // Fake success if filtering removed all messages
+            res = { payload: { result: { status: 'ok', message: 'No matching data to save' } } };
+        }
+
+        // Update cursor on success
+        if (res?.payload?.result?.status === 'ok') {
+            saveCursorsRef.current[targetFilename] = totalLength;
+        }
+        return res;
     };
 
     const value = {
@@ -222,6 +328,10 @@ export function PCANProvider({ children }) {
         messages,
         latestTireData,
         globalHistory,
+        packetStats,
+        startTime,
+        baseId,
+        setBaseId,
         rawMessageBufferRef,
         clearData,
         saveBuffer

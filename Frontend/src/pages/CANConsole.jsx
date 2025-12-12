@@ -6,7 +6,16 @@ import { usePCAN } from '../context/PCANContext';
 function CANConsole() {
   const navigate = useNavigate();
   // Global Context
-  const { messages: contextMessages, isConnected: contextConnected, setIsConnected, saveBuffer, clearData } = usePCAN();
+  // Global Context
+  const {
+    messages: contextMessages,
+    isConnected: contextConnected,
+    setIsConnected,
+    saveBuffer,
+    clearData,
+    baseId,
+    setBaseId
+  } = usePCAN();
 
   // Local UI state
   const [connected, setConnected] = useState(false); // Validating if we should sync this or just use context
@@ -69,7 +78,7 @@ function CANConsole() {
   const [csvFileContent, setCsvFileContent] = useState('');
   const [csvFileName, setCsvFileName] = useState('');
   const [timerInterval, setTimerInterval] = useState(2000);
-  const [baseId, setBaseId] = useState(1280);
+  /* Removed local baseId */
   const [timerRunning, setTimerRunning] = useState(false);
   const [timerLogs, setTimerLogs] = useState([]);
   const timerLogTimerRef = useRef(null);
@@ -235,7 +244,7 @@ function CANConsole() {
 
   const handleSaveData = async () => {
     try {
-      const res = await saveBuffer();
+      const res = await saveBuffer('can_intermediate_data.json');
       if (res?.payload?.result?.status === 'ok') {
         pushLog('success', res.payload.result.message || "Data saved");
         // clearData(); // Optional
@@ -500,7 +509,7 @@ function CANConsole() {
           <header>
             <h2>CAN Configuration & Timer Write</h2>
           </header>
-          <div className="timer-config-container" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+          <div className="timer-config-container" style={{ display: 'grid', gridTemplateColumns: '0.8fr 1.2fr', gap: '20px' }}>
             <div className="input-section">
               <div style={{ marginBottom: '15px' }}>
                 <label className="checkbox-item" style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
@@ -571,24 +580,145 @@ function CANConsole() {
             </div>
 
             <div className="log-section">
-              <h3 style={{ marginTop: 0, marginBottom: '10px', fontSize: '16px', color: 'var(--muted)' }}>Sequence Log</h3>
+              <h3 style={{ marginTop: 0, marginBottom: '10px', fontSize: '16px', color: 'var(--muted)' }}>Sequence Log (Tx / Rx)</h3>
               <div className="timer-log-box" style={{
                 height: '300px',
                 overflowY: 'auto',
                 background: '#080b16',
                 border: '1px solid var(--border)',
                 borderRadius: '8px',
-                padding: '10px',
+                padding: '0',
                 fontFamily: 'monospace',
                 fontSize: '12px'
               }}>
-                {timerLogs.length === 0 && <span style={{ color: 'var(--muted)' }}>Logs will appear here...</span>}
-                {timerLogs.map((log, idx) => (
-                  <div key={idx} style={{ marginBottom: '4px', color: log.type === 'error' ? '#ff5c6a' : log.type === 'sent' ? '#5cc8ff' : log.type === 'recv' ? '#29d98c' : 'var(--text)' }}>
-                    <span style={{ color: 'var(--muted)', marginRight: '8px' }}>[{log.timestamp.split('T')[1].split('.')[0]}]</span>
-                    {log.message}
-                  </div>
-                ))}
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead style={{ position: 'sticky', top: 0, background: '#1a1f35', zIndex: 1 }}>
+                    <tr>
+                      <th style={{ padding: '8px', textAlign: 'left', borderBottom: '1px solid #444', color: '#5cc8ff' }}>Tx (Sent)</th>
+                      <th style={{ padding: '8px', textAlign: 'left', borderBottom: '1px solid #444', color: '#29d98c' }}>Rx (Recv)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(() => {
+                      // Process logs to group by Tx/Rx based on CmdType
+                      // Logic: Scan for "Sent" logs. For each, find matching "Recv" log with same CmdType.
+                      // Format Sent: "Sent: ID=0x... Data=AA BB ..."
+                      // Format Recv: "Recv: 0x... | Data: AA BB ... | Time: ..."
+
+                      const rows = [];
+                      const sentLogs = timerLogs.filter(l => l.type === 'sent');
+                      const recvLogs = [...timerLogs.filter(l => l.type === 'recv')]; // Copy to consume
+                      const infoLogs = timerLogs.filter(l => l.type === 'info' || l.type === 'error');
+
+                      // Helper to get CmdType (first 2 bytes)
+                      const getCmdType = (dataStr) => {
+                        if (!dataStr) return null;
+                        const parts = dataStr.trim().split(' ');
+                        if (parts.length < 2) return null;
+                        return parts.slice(0, 2).join(' ');
+                      };
+
+                      // Helper to parse log message
+                      const parseSent = (msg) => {
+                        // "Sent: ID=0x123 Data=02 01 ..."
+                        const idMatch = msg.match(/ID=0x([0-9A-Fa-f]+)/);
+                        const dataMatch = msg.match(/Data=(.*)/);
+                        return {
+                          id: idMatch ? idMatch[1] : '?',
+                          data: dataMatch ? dataMatch[1].trim() : '',
+                        };
+                      };
+
+                      const parseRecv = (msg) => {
+                        // "Recv: 0x123 | Data: 02 01 ... | Time: ..."
+                        const idMatch = msg.match(/Recv: (0x[0-9A-Fa-f]+)/);
+                        const dataMatch = msg.match(/Data: ([0-9A-Fa-f ]+)/);
+                        return {
+                          id: idMatch ? idMatch[1] : '?',
+                          data: dataMatch ? dataMatch[1].trim() : '',
+                        };
+                      };
+
+                      sentLogs.forEach(sentLog => {
+                        const sentInfo = parseSent(sentLog.message);
+                        const sentCmd = getCmdType(sentInfo.data);
+
+                        let matchingRxIndex = -1;
+
+                        if (sentCmd) {
+                          // Find first Recv with same CmdType
+                          matchingRxIndex = recvLogs.findIndex(rxLog => {
+                            const rxInfo = parseRecv(rxLog.message);
+                            const rxCmd = getCmdType(rxInfo.data);
+                            return rxCmd === sentCmd;
+                          });
+                        }
+
+                        let rxLog = null;
+                        if (matchingRxIndex !== -1) {
+                          rxLog = recvLogs[matchingRxIndex];
+                          recvLogs.splice(matchingRxIndex, 1); // Consume it
+                        }
+
+                        rows.push({
+                          type: 'pair',
+                          tx: sentLog,
+                          rx: rxLog
+                        });
+                      });
+
+                      // Remaining info logs (append at bottom or top? User focused on table. Let's put info at top or just interleave by time?)
+                      // User request: "create table... keep same cmdtype at same row". 
+                      // I will just render the pairs. Info logs can be hidden or shown at bottom.
+                      // Let's show Info logs at the bottom for status.
+
+                      return (
+                        <>
+                          {rows.map((row, idx) => (
+                            <tr key={idx} style={{ borderBottom: '1px solid #222' }}>
+                              <td style={{ padding: '6px', verticalAlign: 'top', borderRight: '1px solid #333' }}>
+                                {/* Tx: Remove "Sent: " prefix */}
+                                <div style={{ color: '#5cc8ff' }}>{row.tx.message.replace('Sent: ', '')}</div>
+                                <div style={{ color: '#666', fontSize: '10px' }}>{row.tx.timestamp.split('T')[1].slice(0, 12)}</div>
+                              </td>
+                              <td style={{ padding: '6px', verticalAlign: 'top' }}>
+                                {row.rx ? (() => {
+                                  // Rx: "Recv: 0x581 | Data: ... | Time: ..." -> "0x581 | Data: ..."
+                                  // Extract Time from the end
+                                  const rxMsg = row.rx.message;
+                                  let displayMsg = rxMsg.replace('Recv: ', '');
+                                  let timeDisplay = '';
+
+                                  const timeMatch = displayMsg.match(/ \| Time: (.*)/);
+                                  if (timeMatch) {
+                                    timeDisplay = timeMatch[1];
+                                    displayMsg = displayMsg.replace(timeMatch[0], ''); // Remove Time part from main string
+                                  } else {
+                                    // Fallback if regex fails (e.g. old logs)
+                                    timeDisplay = row.rx.timestamp.split('T')[1].slice(0, 12);
+                                  }
+
+                                  return (
+                                    <>
+                                      <div style={{ color: '#29d98c' }}>{displayMsg}</div>
+                                      <div style={{ color: '#666', fontSize: '10px' }}>{timeDisplay}</div>
+                                    </>
+                                  );
+                                })() : (
+                                  <span style={{ color: '#444' }}>-</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                          {/* Summary Info Logs removed as requested */}
+                          {rows.length === 0 && infoLogs.length === 0 && (
+                            <tr><td colSpan="2" style={{ padding: '20px', textAlign: 'center', color: '#555' }}>No logs</td></tr>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>

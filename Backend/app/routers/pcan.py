@@ -9,7 +9,7 @@ from datetime import datetime
 
 router = APIRouter()
 
-DATA_FILE_PATH = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data.json')
+DATA_FILE_PATH = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Data', 'data.json')
 
 @router.post("/pcan/initialize", response_model=CommandResponse)
 async def initialize_pcan(request: InitRequest):
@@ -94,17 +94,30 @@ async def get_pcan_status():
 async def save_data(request: SaveDataRequest):
     try:
         new_messages = request.payload.data or []
+        target_filename = request.payload.filename or "data.json"
         
+        # Sanitize filename to prevent directory traversal
+        target_filename = os.path.basename(target_filename)
+        if not target_filename.endswith('.json'):
+            target_filename += '.json'
+            
+        # Determine path
+        # Assuming we want to save in the same directory as data.json (Data folder)
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Data'))
+        if not os.path.exists(base_dir):
+            os.makedirs(base_dir)
+        file_path = os.path.join(base_dir, target_filename)
+
         # "Style like tpms_streamed_data.json": List of objects, appended.
         
         # Check if file exists and determine start logic
-        file_exists = os.path.exists(DATA_FILE_PATH)
+        file_exists = os.path.exists(file_path)
         start_new = True
         
         if file_exists:
             # Check if it's a list or needs reset
             try:
-                with open(DATA_FILE_PATH, 'r') as f:
+                with open(file_path, 'r') as f:
                     first_char = f.read(1)
                     if first_char == '[':
                         start_new = False
@@ -117,7 +130,7 @@ async def save_data(request: SaveDataRequest):
         if not start_new:
             try:
                 # Use binary mode to reliably find and remove the last ']' ignoring newlines
-                with open(DATA_FILE_PATH, 'rb+') as f:
+                with open(file_path, 'rb+') as f:
                     f.seek(0, os.SEEK_END)
                     # Search backwards for 50 bytes max to find ']'
                     search_limit = 50
@@ -163,7 +176,7 @@ async def save_data(request: SaveDataRequest):
                 print(f"Seek error: {e}")
                 pass
 
-        with open(DATA_FILE_PATH, mode) as f:
+        with open(file_path, mode) as f:
             if start_new:
                 f.write('[\n')
 
@@ -187,7 +200,7 @@ async def save_data(request: SaveDataRequest):
             payload=ResponsePayload(
                 result=Result(
                     status="ok",
-                    message=f"Saved {len(new_messages)} messages to data.json"
+                    message=f"Saved {len(new_messages)} messages to {target_filename}"
                 ),
                 data="",
                 packet_status="success"
@@ -299,3 +312,5 @@ async def get_default_csv():
                 packet_status="failed"
             )
         )
+
+
