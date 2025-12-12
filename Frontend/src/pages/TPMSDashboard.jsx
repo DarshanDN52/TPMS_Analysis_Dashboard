@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import Chart from 'chart.js/auto';
 import ChartZoom from 'chartjs-plugin-zoom';
 import { pcanApi } from '../services/api';
+import { usePCAN } from '../context/PCANContext';
 
 Chart.register(ChartZoom);
 
@@ -14,6 +15,9 @@ function TPMSDashboard() {
   const mainChartInstanceRef = useRef(null);
   const detailChartRef = useRef(null);
   const detailChartInstanceRef = useRef(null);
+
+  // Global Context
+  const { latestTireData, globalHistory, saveBuffer } = usePCAN();
 
   const [config, setConfig] = useState(() => {
     try {
@@ -34,6 +38,19 @@ function TPMSDashboard() {
   const [detailView, setDetailView] = useState('pressure');
   const [dataHistory, setDataHistory] = useState({ pressure: {}, temperature: {}, battery: {} });
   const [isCollecting, setIsCollecting] = useState(false);
+
+  const handleSaveData = async () => {
+    try {
+      const res = await saveBuffer();
+      if (res?.payload?.result?.status === 'ok') {
+        alert(res.payload.result.message || "Saved successfully");
+      } else {
+        alert("Failed to save: " + (res?.payload?.result?.message || "Unknown error"));
+      }
+    } catch (e) {
+      alert(e.message);
+    }
+  };
 
   // New state for graph filtering
   const [visibleTires, setVisibleTires] = useState([]);
@@ -135,7 +152,17 @@ function TPMSDashboard() {
     }
 
     setTireData(initialTires);
-    setDataHistory(initialHistory);
+    setTireData(initialTires);
+    // Initialize history from Global History if available
+    // Merging global history with any saved session history (if robust)
+    // For now, let's prefer Global History as it's the "Live" truth
+    if (!config?.isMockMode) {
+      setDataHistory(globalHistory);
+    } else {
+      setDataHistory(initialHistory);
+    }
+
+    // Initialize visible tires to all tires
 
     // Initialize visible tires to all tires
     const allTireIds = [];
@@ -248,20 +275,21 @@ function TPMSDashboard() {
       });
     };
 
-    let intervalId;
+    // --- DATA SYNC LOGIC (Replaces polling) ---
+
+    // 1. Simulation Mode (Kept separate)
     let simulationTimeoutId;
 
     if (config.isMockMode) {
-      // --- SIMULATION MODE ---
+      // ... (Simulation Logic kept as is, but ensuring we don't mix live data)
       try {
         const storedData = sessionStorage.getItem('tpmsSimulationData');
         if (storedData) {
           let parsedMessages = [];
           const parsedJson = JSON.parse(storedData);
 
-          // Handle both file formats: Raw { messages: [] } or Array of Sessions [ { messages: [] } ]
+          // Handle both file formats
           if (Array.isArray(parsedJson)) {
-            // Flatten all sessions
             parsedJson.forEach(session => {
               if (session.messages && Array.isArray(session.messages)) {
                 parsedMessages = [...parsedMessages, ...session.messages];
@@ -272,32 +300,22 @@ function TPMSDashboard() {
           }
 
           if (parsedMessages.length > 0) {
-            // Sort by timestamp just in case
             parsedMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 
             let currentIndex = 0;
-            const startTime = new Date(parsedMessages[0].timestamp).getTime();
-
             const playSimulation = () => {
               if (currentIndex >= parsedMessages.length) return;
-
               const msg = parsedMessages[currentIndex];
-              processMessage(msg, msg.timestamp); // Pass original timestamp
-
+              processMessage(msg, msg.timestamp);
               currentIndex++;
               if (currentIndex < parsedMessages.length) {
                 const nextMsg = parsedMessages[currentIndex];
                 const currentMsgTime = new Date(msg.timestamp).getTime();
                 const nextMsgTime = new Date(nextMsg.timestamp).getTime();
-                const delay = Math.max(0, nextMsgTime - currentMsgTime);
-
-                // Limit delay to max 3 seconds to avoid long pauses in replay
-                const cappedDelay = Math.min(delay, 3000);
-
-                simulationTimeoutId = setTimeout(playSimulation, cappedDelay);
+                const delay = Math.min(Math.max(0, nextMsgTime - currentMsgTime), 3000);
+                simulationTimeoutId = setTimeout(playSimulation, delay);
               }
             };
-
             console.log(`Starting Simulation with ${parsedMessages.length} messages...`);
             playSimulation();
           } else {
@@ -307,28 +325,61 @@ function TPMSDashboard() {
       } catch (err) {
         console.error("Simulation parse error:", err);
       }
-
-    } else {
-      // --- LIVE MODE ---
-      const fetchData = async () => {
-        try {
-          const res = await pcanApi.read();
-          const msg = res?.payload?.data?.message;
-          if (msg) processMessage(msg);
-        } catch (e) { void e; }
-      };
-
-      const startFetching = async () => {
-        intervalId = setInterval(fetchData, 100);
-      };
-      startFetching();
     }
 
     return () => {
-      if (intervalId) clearInterval(intervalId);
       if (simulationTimeoutId) clearTimeout(simulationTimeoutId);
     };
   }, [isCollecting, config, calculateStatus]);
+
+  // 2. LIVE MODE SYNC (From Context)
+  // We separate this effect to run whenever 'latestTireData' changes
+  // We tracked "lastprocessed" explicitly or just trust diffs?
+  // Let's use a Ref to track last update times we've processed to avoid duplicate history points
+  const lastProcessedTimeRef = useRef({});
+
+  useEffect(() => {
+    if (config?.isMockMode || !isCollecting) return;
+
+    // Iterate over the tires in latestTireData
+    Object.values(latestTireData).forEach(tireCtx => {
+      if (!tireCtx || !tireCtx.tireIndex || !tireCtx.lastUpdate) return;
+
+      const idx = tireCtx.tireIndex;
+      const lastProcessed = lastProcessedTimeRef.current[idx];
+      const currentUpdate = new Date(tireCtx.lastUpdate).getTime();
+
+      // If this is a new update we hasn't processed
+      if (!lastProcessed || currentUpdate > lastProcessed) {
+        lastProcessedTimeRef.current[idx] = currentUpdate;
+
+        // Update Tire Data Visuals
+        setTireData(prev => {
+          const existing = prev[idx] || {};
+          // Only update if something changed? React handles shallow diffs but let's be safe
+          // Merging context data into our view model
+          return {
+            ...prev,
+            [idx]: {
+              ...existing,
+              ...tireCtx,
+              // Ensure position/id are preserved from initialization
+              id: idx,
+              position: existing.position || getTirePositionName(idx, config.axleConfig),
+              // Map fields if names differ? Context uses same names: pressure, temperature, battery, status
+            }
+          };
+        });
+
+        // Update History from GLOBAL context if live
+        if (!config?.isMockMode) {
+          // We need valid data. Global History is continuously updated by Context.
+          // We just reflect it here.
+          setDataHistory(globalHistory);
+        }
+      }
+    });
+  }, [latestTireData, isCollecting, config, getTirePositionName]);
 
   useEffect(() => {
     if (!mainChartRef.current || !config || Object.keys(dataHistory.pressure).length === 0) return;
@@ -406,7 +457,7 @@ function TPMSDashboard() {
         mainChartInstanceRef.current.destroy();
       }
     };
-  }, [dataHistory, selectedMetric, config, generateColors, getTirePositionName, visibleTires]);
+  }, [dataHistory, selectedMetric, config, generateColors, getTirePositionName, visibleTires, globalHistory]);
 
   const toggleTireVisibility = (tireId) => {
     setVisibleTires(prev => {
@@ -624,6 +675,7 @@ function TPMSDashboard() {
           <h1>TPMS Dashboard</h1>
           <div className="header-controls">
             <button className="btn-secondary" onClick={() => navigate('/')}>Back to Main</button>
+            <button className="btn-primary" onClick={handleSaveData} style={{ marginLeft: '10px' }}>Save Data</button>
           </div>
         </header>
 

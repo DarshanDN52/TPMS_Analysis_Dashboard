@@ -43,16 +43,25 @@ async def release_pcan():
 
 @router.get("/pcan/read", response_model=CommandResponse)
 async def read_pcan():
-    result = pcan_service.read_message()
-    # Wrap message in data object for frontend compatibility
-    message_data = result.get("message")
-    response_data = {"message": message_data} if message_data else result.get("error", "")
+    # Switch to batch reading to avoid bottlenecks
+    result = pcan_service.read_all_messages()
+    
+    # Payload now contains "messages": [ ... ]
+    messages_list = result.get("messages", [])
+    
+    # We maintain the "message" key for backward compatibility if needed, 
+    # but the frontend shoud switch to "messages".
+    # Just in case, let's put the first message in "message" if exists (optional)
+    # But clean approach is: data = { "messages": [...] }
+    
+    response_data = {"messages": messages_list}
+    
     return CommandResponse(
         command="DATA",
         payload=ResponsePayload(
             result=Result(
                 status="ok" if result["success"] else "error",
-                message=result.get("error", "") if not result["success"] else "Read successful"
+                message=f"Read {len(messages_list)} messages" if result["success"] else result.get("error", "")
             ),
             data=response_data,
             packet_status="success" if result["success"] else "failed"

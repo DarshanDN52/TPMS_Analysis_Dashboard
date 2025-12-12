@@ -404,6 +404,36 @@ class PCANService:
                 "success": False,
                 "message": f"Error reading message: {str(e)}"
             }
+
+    def read_all_messages(self) -> Dict[str, Any]:
+        """
+        Retrieves ALL currently buffered messages.
+        This prevents the queue from filling up if the frontend polls slower than the bus speed.
+        """
+        if not self.initialized:
+            return {
+                "success": False,
+                "messages": [] # Return list for consistency
+            }
+        
+        # 1. Drain internal threaded buffer
+        messages = []
+        while self.read_buffer:
+            try:
+                messages.append(self.read_buffer.popleft())
+            except IndexError:
+                break
+        
+        # 2. Also try to read whatever is currently in the hardware queue (poll once more)
+        # This ensures we get the "very latest" if the thread is sleeping
+        # (Optional, but good for "real-time" feel)
+        # We won't force a hardware read here to avoid race conditions with the thread.
+        # The thread is fast enough (0.05s sleep).
+        
+        return {
+            "success": True,
+            "messages": messages
+        }
     
     def write_message(self, msg_id: str, data: list, extended: bool = False, rtr: bool = False) -> Dict[str, Any]:
         if not self.initialized:
@@ -753,13 +783,46 @@ class PCANService:
                                     all_received_msgs.append({
                                         "sent_id": f"0x{can_id:X}",
                                         "response_id": f"0x{msg_id_int:X}",
-                                        "data": data_str
+                                        "data": data_str,
+                                        "time": datetime.now().strftime("%H:%M:%S.%f")[:-3]
                                     })
                                     recv_stats[msg_id_int] += 1
                             except:
                                 pass
                         
                         time.sleep(0.01)
+
+            # Post-Sequence Listening (Dynamic Interval)
+            # Use the last 'interval_ms' from the loop, or default 0 if not available?
+            # User wants: "total 2*timeinterval after 4 th frame".
+            # The 4th frame loop wait = 1*interval. We add 1*interval here. Total = 2*interval.
+            
+            last_interval_ms = locals().get('interval_ms', 1000) # Default to 1000 if not defined
+            
+            post_start = time.time()
+            post_wait = last_interval_ms / 1000.0
+            
+            while (time.time() - post_start) < post_wait:
+                if self.stop_timer_event.is_set(): break
+                
+                while len(self.timer_response_buffer) > 0:
+                     msg = self.timer_response_buffer.popleft()
+                     try:
+                        msg_id_int = int(msg['id'], 16)
+                        if msg_id_int in allowed_response_ids:
+                            data_str = " ".join([f"{x:02X}" for x in msg['data']])
+                            
+                            current_sent_id = f"0x{can_id:X}" if 'can_id' in locals() else "Unknown"
+                            
+                            all_received_msgs.append({
+                                "sent_id": current_sent_id,
+                                "response_id": f"0x{msg_id_int:X}",
+                                "data": data_str,
+                                "time": datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                            })
+                     except:
+                        pass
+                time.sleep(0.01)
             
             self.timer_logs.append({
                 "type": "info",
@@ -767,9 +830,44 @@ class PCANService:
                 "timestamp": datetime.now().isoformat()
             })
             
-            # User requested to NOT show the summary table or listened data.
-            # Code for table generation removed.
+            # Summary of all received messages
+            timer_end_time = datetime.now()
+            duration_sec = (timer_end_time - datetime.fromisoformat(self.timer_logs[0]['timestamp'])).total_seconds()
+            
+            # Calculate total expected responses (Sum of Repeats)
+            total_expected = sum(cmd['repeat'] for cmd in commands)
+            total_received = len(all_received_msgs)
 
+            if all_received_msgs:
+                self.timer_logs.append({
+                    "type": "info",
+                    "message": f"--- Listened Data (Refreshed) ---",
+                    "timestamp": datetime.now().isoformat()
+                })
+                self.timer_logs.append({
+                    "type": "info",
+                    "message": f"Listening Duration: {duration_sec:.2f}s | Expected: {total_expected} | Recv: {total_received}",
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                for msg in all_received_msgs:
+                    # User requested 'Recv: 0x581 | Data: ...' (Time optional? I will keep time as it's useful)
+                    self.timer_logs.append({
+                        "type": "recv",
+                        "message": f"Recv: {msg['response_id']} | Data: {msg['data']} | Time: {msg.get('time', '-')}",
+                        "timestamp": datetime.now().isoformat()
+                    })
+            else:
+                 self.timer_logs.append({
+                    "type": "info",
+                    "message": "No matching responses received.",
+                    "timestamp": datetime.now().isoformat()
+                })
+                 self.timer_logs.append({
+                    "type": "info",
+                    "message": f"Listening Duration: {duration_sec:.2f}s | Expected: {total_expected} | Recv: 0",
+                    "timestamp": datetime.now().isoformat()
+                })
 
             
         except Exception as e:
