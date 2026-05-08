@@ -25,8 +25,8 @@ export function PCANProvider({ children }) {
 
     const pollTimerRef = useRef(null);
 
-    // Helper to process packet for TPMS (Ported from TPMSDashboard logic)
-    const processTPMSPacket = (msg) => {
+    // Helper to process packet for Multifeet (Ported from Multifeet logic)
+    const processMultifeetPacket = (msg) => {
         // 1. Basic Validation
         if (!msg || typeof msg === 'string') return;
 
@@ -123,7 +123,7 @@ export function PCANProvider({ children }) {
                             ? m.data.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')
                             : '';
                         return {
-                            id: m.id,
+                            id: m.id.toString().padStart(8, '0').toUpperCase(),
                             len: m.len,
                             data: dataStr,
                             msg_type: m.msg_type,
@@ -134,7 +134,7 @@ export function PCANProvider({ children }) {
                     return combined.slice(0, 200);
                 });
 
-                // C. Update TPMS State
+                // C. Update Multifeet State
                 setLatestTireData(prev => {
                     const next = { ...prev };
                     specificMessages.forEach(msg => {
@@ -143,7 +143,7 @@ export function PCANProvider({ children }) {
                         const msgIdDec = parseInt(msg.id, 16);
                         if (msgIdDec !== baseId + 0x02) return;
 
-                        const update = processTPMSPacket(msg);
+                        const update = processMultifeetPacket(msg);
                         if (update && update.tireIndex) {
                             const idx = update.tireIndex;
                             const existing = next[idx] || {};
@@ -172,7 +172,7 @@ export function PCANProvider({ children }) {
                         const msgIdDec = parseInt(msg.id, 16);
                         if (msgIdDec !== baseId + 0x02) return;
 
-                        const update = processTPMSPacket(msg);
+                        const update = processMultifeetPacket(msg);
                         if (update && update.tireIndex && update.pressure !== undefined) {
                             // Only push if we have valid sensor data (Type 1, 16, 17)
                             // processTPMSPacket returns pressure/temp/batt for these types.

@@ -62,7 +62,7 @@ class PCANService:
         self.base_path = os.path.join(root_dir, 'Data')
         if not os.path.exists(self.base_path):
             os.makedirs(self.base_path)
-        self.record_path = os.path.join(self.base_path, 'tpms_streamed_data.json')
+        self.record_path = os.path.join(self.base_path, 'multifeet_streamed_data.json')
         self.stream_file = None
         self.stream_file = None
         self.first_message = True
@@ -452,7 +452,7 @@ class PCANService:
                         "success": True,
                         "message": {
                             "counter": self.message_counter,
-                            "id": f"{msgfd.ID:03X}",
+                            "id": f"{msgfd.ID:08X}",
                             "msg_type": "DATA",
                             "len": msgfd.DLC,
                             "data": datafd,
@@ -475,7 +475,7 @@ class PCANService:
                     "success": True,
                     "message": {
                         "counter": self.message_counter,
-                        "id": f"{can_msg.ID:03X}",
+                        "id": f"{can_msg.ID:08X}",
                         "msg_type": "DATA",
                         "len": can_msg.LEN,
                         "data": data,
@@ -602,7 +602,7 @@ class PCANService:
                                 is_rtr = False
                             msg_type_str = "RTR" if is_rtr else "DATA"
                             item = {
-                                "id": f"{can_msg.ID:03X}",
+                                "id": f"{can_msg.ID:08X}",
                                 "msg_type": msg_type_str,
                                 "len": can_msg.LEN,
                                 "data": data,
@@ -616,7 +616,7 @@ class PCANService:
                             
                             # Identifier Stats Aggregation
                             try:
-                                # Target ID for TPMS is typically BaseID (0x500) + 2 = 0x502 (1282)
+                                # Target ID for Multifeet is typically BaseID (0x500) + 2 = 0x502 (1282)
                                 if can_msg.ID == 0x502 and len(data) >= 2:
                                     sensor_id = data[0] & 0xFF
                                     tire_index = sensor_id + 1

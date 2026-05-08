@@ -90,8 +90,6 @@ export const pcanApi = {
       })
     });
     return response.json();
-    return response.json();
-    return response.json();
   },
 
   async startTimerSequence(mode, data, interval, baseId) {
@@ -118,30 +116,6 @@ export const pcanApi = {
 
   async getDefaultCsv() {
     const response = await fetch(`${API_BASE}/pcan/timer/default-csv`);
-    return response.json();
-  }
-};
-
-export const tpmsApi = {
-  async start(tireCount, axleConfig) {
-    const response = await fetch(`${API_BASE}/tpms/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tire_count: tireCount, axle_config: axleConfig })
-    });
-    return response.json();
-  },
-
-  async stop() {
-    const response = await fetch(`${API_BASE}/tpms/stop`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    });
-    return response.json();
-  },
-
-  async getStatus() {
-    const response = await fetch(`${API_BASE}/tpms/status`);
     return response.json();
   }
 };
